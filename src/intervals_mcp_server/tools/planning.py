@@ -645,7 +645,7 @@ async def get_planning_context(
     # Upcoming races
     sections.append("\n## Komende wedstrijden (120 dagen)")
     if isinstance(races_result, list) and races_result:
-        races = [e for e in races_result if e.get("category") in ("RACE", "A", "B", "C")]
+        races = [e for e in races_result if e.get("category") in ("RACE_A", "RACE_B", "RACE_C")]
         if races:
             for r in races:
                 d = (r.get("start_date_local") or "")[:10]
@@ -658,3 +658,78 @@ async def get_planning_context(
         sections.append("Geen wedstrijden gepland.")
 
     return "\n".join(sections)
+
+
+@mcp.tool()
+async def add_race_event(
+    name: str,
+    race_date: str,
+    priority: str = "A",
+    start_time: str = "10:00:00",
+    sport: str = "Ride",
+    duration_minutes: int | None = None,
+    distance_km: float | None = None,
+    expected_tss: int | None = None,
+    athlete_id: str | None = None,
+    api_key: str | None = None,
+) -> str:
+    """Add a race event to the Intervals.icu calendar.
+
+    Creates an event with category RACE_A, RACE_B, or RACE_C. The priority
+    determines how the ATP and HRV coach treat the event:
+    - A: most important race — full taper, no heavy training the week before
+    - B: important race — reduce load 2 days before
+    - C: training race — treat as a hard training day
+
+    Args:
+        name: Name of the race (e.g. "Ronde van Vlaanderen")
+        race_date: Date of the race in YYYY-MM-DD format
+        priority: Race priority — A, B, or C (default A)
+        start_time: Start time in HH:MM:SS format (default 10:00:00)
+        sport: Sport type — Ride, Run, Swim, etc. (default Ride)
+        duration_minutes: Expected race duration in minutes (optional)
+        distance_km: Expected race distance in km (optional)
+        expected_tss: Expected Training Stress Score for the race (optional)
+        athlete_id: The Intervals.icu athlete ID (optional)
+        api_key: The Intervals.icu API key (optional)
+    """
+    athlete_id_to_use, error_msg = resolve_athlete_id(athlete_id, config.athlete_id)
+    if error_msg:
+        return error_msg
+
+    try:
+        validate_date(race_date)
+    except ValueError as e:
+        return f"Error in race_date: {e}"
+
+    priority_upper = priority.strip().upper()
+    if priority_upper not in ("A", "B", "C"):
+        return "Error: priority must be A, B, or C."
+
+    event_data: dict[str, Any] = {
+        "category": f"RACE_{priority_upper}",
+        "type": sport,
+        "name": name,
+        "start_date_local": f"{race_date}T{start_time}",
+    }
+
+    if duration_minutes is not None:
+        event_data["moving_time"] = duration_minutes * 60
+    if distance_km is not None:
+        event_data["distance"] = int(distance_km * 1000)
+    if expected_tss is not None:
+        event_data["icu_training_load"] = expected_tss
+
+    result = await make_intervals_request(
+        url=f"/athlete/{athlete_id_to_use}/events",
+        api_key=api_key,
+        data=event_data,
+        method="POST",
+    )
+
+    if isinstance(result, dict) and "error" in result:
+        return f"Error adding race: {result.get('message')}"
+
+    event_id = result.get("id") if isinstance(result, dict) else None
+    id_str = f" (id: {event_id})" if event_id else ""
+    return f"Race '{name}' aangemaakt op {race_date} [RACE_{priority_upper}]{id_str}."
