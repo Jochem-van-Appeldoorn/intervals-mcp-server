@@ -547,7 +547,7 @@ async def get_planning_context(
     sunday = monday + timedelta(days=6)
     today = date.today()
 
-    wellness_result, week_events, races_result = await asyncio.gather(
+    _raw = await asyncio.gather(
         make_intervals_request(
             url=f"/athlete/{athlete_id_to_use}/wellness",
             api_key=api_key,
@@ -571,11 +571,16 @@ async def get_planning_context(
         ),
         return_exceptions=True,
     )
-
-    # Unwrap any exceptions returned by gather (return_exceptions=True)
-    wellness_result = wellness_result if not isinstance(wellness_result, BaseException) else []
-    week_events = week_events if not isinstance(week_events, BaseException) else []
-    races_result = races_result if not isinstance(races_result, BaseException) else []
+    _fallback: list[Any] = []
+    wellness_result: dict[str, Any] | list[dict[str, Any]] = (
+        _raw[0] if not isinstance(_raw[0], BaseException) else _fallback
+    )
+    week_events: dict[str, Any] | list[dict[str, Any]] = (
+        _raw[1] if not isinstance(_raw[1], BaseException) else _fallback
+    )
+    races_result: dict[str, Any] | list[dict[str, Any]] = (
+        _raw[2] if not isinstance(_raw[2], BaseException) else _fallback
+    )
 
     week_list = week_events if isinstance(week_events, list) else []
     sections: list[str] = [f"# Planningcontext: week {monday} – {sunday}\n"]
