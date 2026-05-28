@@ -9,6 +9,7 @@ athlete's current fitness level:
 - get_atp_plan     reads all phase notes from the calendar.
 - get_atp_week_note  returns the phase note covering a specific week.
 - get_planning_context  returns fitness + ATP note + events for weekly planning.
+- add_race_event   adds a race event with priority A, B, or C.
 """
 
 import asyncio
@@ -28,43 +29,43 @@ config = get_config()
 
 _PHASES: dict[str, dict[str, Any]] = {
     "preparation": {
-        "label": "Voorbereiding",
+        "label": "Preparation",
         "color": "green",
-        "focus": "Algemene conditie opbouwen. Aerobe basis leggen, kracht en techniek.",
-        "intensity": "80% Z2, 15% sweetspot, 5% drempel.",
-        "key_sessions": ["Lange Z2 duurritten", "Krachttraining", "Soepelheid / techniek"],
+        "focus": "Build general fitness. Establish aerobic base, strength and technique.",
+        "intensity": "80% Z2, 15% sweet spot, 5% threshold.",
+        "key_sessions": ["Long Z2 endurance rides", "Strength training", "Flexibility / technique"],
         "tss_factor": 0.60,
     },
     "base": {
-        "label": "Basis",
+        "label": "Base",
         "color": "blue",
-        "focus": "Aerobe motor versterken. Hoog volume Z2, sweetspot, drempel introductie.",
-        "intensity": "65% Z2, 25% sweetspot, 10% drempel.",
-        "key_sessions": ["Lange duurritten (3–5 uur)", "2× sweetspot per week", "1× drempelinterval"],
+        "focus": "Strengthen the aerobic engine. High Z2 volume, sweet spot, threshold introduction.",
+        "intensity": "65% Z2, 25% sweet spot, 10% threshold.",
+        "key_sessions": ["Long endurance rides (3–5 h)", "2× sweet spot per week", "1× threshold interval"],
         "tss_factor": 0.80,
     },
     "build": {
-        "label": "Opbouw",
+        "label": "Build",
         "color": "orange",
-        "focus": "Wedstrijdspecifieke kwaliteiten. Drempel, VO2max en anaerobe capaciteit uitbouwen.",
-        "intensity": "40% Z2, 30% drempel, 30% VO2max / anaeroob.",
-        "key_sessions": ["2× VO2max of drempel per week", "Lange duurrit", "Wedstrijdsimulatie"],
+        "focus": "Race-specific qualities. Develop threshold, VO2max and anaerobic capacity.",
+        "intensity": "40% Z2, 30% threshold, 30% VO2max / anaerobic.",
+        "key_sessions": ["2× VO2max or threshold per week", "Long endurance ride", "Race simulation"],
         "tss_factor": 1.00,
     },
     "peak": {
-        "label": "Piek",
+        "label": "Peak",
         "color": "red",
-        "focus": "Scherp worden voor de koers. Volume daalt, intensiteit blijft hoog. Tapering.",
-        "intensity": "50% Z2, 25% drempel, 25% VO2max — kortere intervallen.",
-        "key_sessions": ["Race-pace intervallen", "Activatierit 2 dagen voor koers", "Rustdag voor koers"],
+        "focus": "Get sharp for the race. Volume drops, intensity stays high. Taper.",
+        "intensity": "50% Z2, 25% threshold, 25% VO2max — shorter intervals.",
+        "key_sessions": ["Race-pace intervals", "Activation ride 2 days before race", "Rest day before race"],
         "tss_factor": 0.65,
     },
     "race": {
-        "label": "Koers",
+        "label": "Race",
         "color": "red",
-        "focus": "Presteren op de A-koers. Minimale training, volle focus op wedstrijd en herstel.",
-        "intensity": "Wedstrijd + herstelritten.",
-        "key_sessions": ["Activatierit daags voor koers", "Wedstrijd", "Actief herstel erna"],
+        "focus": "Perform at the A-race. Minimal training, full focus on racing and recovery.",
+        "intensity": "Race + recovery rides.",
+        "key_sessions": ["Activation ride the day before", "Race", "Active recovery afterwards"],
         "tss_factor": 0.50,
     },
 }
@@ -78,8 +79,8 @@ def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> 
     """Return ordered (phase_name, weeks) based on available weeks and CTL gap.
 
     Uses the ratio current_ctl / goal_ctl so thresholds scale with the event:
-    - UCI belofte targeting CTL 110 with current 70 → big gap → needs base
-    - Toertocht finisher targeting CTL 60 with current 50 → small gap → straight to build
+    - UCI u23 rider targeting CTL 110 with current 70 → big gap → needs base
+    - Gran fondo finisher targeting CTL 60 with current 50 → small gap → straight to build
     """
     peak_wks = min(2, max(1, total_weeks // 7))
     race_wks = 1
@@ -129,20 +130,20 @@ def _reason_for_phases(current_ctl: float, goal_ctl: float, total_weeks: int) ->
     ratio = current_ctl / max(goal_ctl, 1.0)
     gap = round(goal_ctl - current_ctl)
     if total_weeks <= 5:
-        return f"Slechts {total_weeks} weken beschikbaar — direct naar piek-fase."
+        return f"Only {total_weeks} weeks available — going straight to peak phase."
     if ratio >= 0.90:
         return (
-            f"CTL {round(current_ctl)} is al dicht bij doel-CTL {goal_ctl} "
-            f"(gap: {gap}) — direct naar opbouwfase."
+            f"CTL {round(current_ctl)} is close to goal CTL {goal_ctl} "
+            f"(gap: {gap}) — going straight to build phase."
         )
     if ratio >= 0.70:
         return (
-            f"CTL {round(current_ctl)} is {gap} punten onder doel-CTL {goal_ctl} "
-            f"({round(ratio * 100)}%) — korte basisblok gevolgd door opbouwfase."
+            f"CTL {round(current_ctl)} is {gap} points below goal CTL {goal_ctl} "
+            f"({round(ratio * 100)}%) — short base block followed by build phase."
         )
     return (
-        f"CTL {round(current_ctl)} is {gap} punten onder doel-CTL {goal_ctl} "
-        f"({round(ratio * 100)}%) — voorbereiding en basisblok nodig voor opbouw."
+        f"CTL {round(current_ctl)} is {gap} points below goal CTL {goal_ctl} "
+        f"({round(ratio * 100)}%) — preparation and base block needed before build."
     )
 
 
@@ -165,7 +166,7 @@ def _recovery_week_numbers(total_weeks: int, cycle: int) -> list[int]:
 def _week_tss(phase: str, goal_tss: int, week: int, total_weeks: int, cycle: int) -> str:
     factor = _PHASES[phase]["tss_factor"]
     if week % cycle == 0:
-        return f"~{round(goal_tss * factor * 0.60 / 50) * 50} TSS  ← herstelweek"
+        return f"~{round(goal_tss * factor * 0.60 / 50) * 50} TSS  ← recovery week"
     load_weeks = [w for w in range(1, total_weeks + 1) if w % cycle != 0]
     idx = load_weeks.index(week) if week in load_weeks else 0
     prog = 0.85 + 0.15 * (idx / max(len(load_weeks) - 1, 1))
@@ -189,26 +190,26 @@ def _build_phase_note(
     total_wks = _weeks_in(start, end)
 
     lines = [
-        f"Fase {phase_num}/{total_phases}: {p['label']}",
-        f"Periode: {start} – {end} ({total_wks} weken)",
-        f"Doel: {p['focus']}",
-        f"Intensiteit: {p['intensity']}",
+        f"Phase {phase_num}/{total_phases}: {p['label']}",
+        f"Period: {start} – {end} ({total_wks} weeks)",
+        f"Goal: {p['focus']}",
+        f"Intensity: {p['intensity']}",
         "",
-        "Hoofdtrainingen per week:",
+        "Key sessions per week:",
         *[f"  • {s}" for s in p["key_sessions"]],
         "",
-        "Weekschema:",
+        "Weekly schedule:",
     ]
     for w in range(1, total_wks + 1):
         w_start = start + timedelta(weeks=w - 1)
         w_end = min(w_start + timedelta(days=6), end)
         lines.append(f"  Week {w} ({w_start} – {w_end}): {_week_tss(phase, goal_tss, w, total_wks, cycle)}")
 
-    lines += ["", f"A-koers: {race_name} ({race_date})"]
+    lines += ["", f"A-race: {race_name} ({race_date})"]
     if phase_races:
-        lines.append("Wedstrijden in deze fase:")
+        lines.append("Races in this phase:")
         for r in phase_races:
-            lines.append(f"  • {r['date']} — {r['name']} [{r.get('priority','C')}]")
+            lines.append(f"  • {r['date']} — {r['name']} [{r.get('priority', 'C')}]")
 
     return "\n".join(lines)
 
@@ -235,16 +236,16 @@ async def create_atp_plan(
     between current and goal CTL, the more base-building phases are added.
 
     Phase selection (based on current CTL as % of goal CTL):
-    - ≥ 90% of goal: already close → Build → Peak → Race
+    - >= 90% of goal: already close → Build → Peak → Race
     - 70–90% of goal: moderate gap → Base → Build → Peak → Race
-    - < 70% of goal: large gap  → Preparation → Base → Build → Peak → Race
+    - < 70% of goal:  large gap   → Preparation → Base → Build → Peak → Race
 
     goal_ctl reference values (CTL needed at race day):
-    - Finish a sportive / gran fondo:        50–70
-    - Club-level amateur racer:              70–90
-    - Competitive amateur / cat. 3–4:        90–110
-    - Semi-pro / UCI belofte:               100–130
-    - Pro continental / WorldTour:          130+
+    - Finish a sportive / gran fondo:       50–70
+    - Club-level amateur racer:             70–90
+    - Competitive amateur / cat. 3–4:       90–110
+    - Semi-pro / UCI U23:                  100–130
+    - Pro continental / WorldTour:         130+
 
     Each phase is posted as a NOTE event spanning its full date range on the
     Intervals.icu calendar. The note contains training focus, intensity split,
@@ -252,13 +253,13 @@ async def create_atp_plan(
 
     Args:
         race_date: Date of the A-race in YYYY-MM-DD format
-        race_name: Name of the A-race (e.g. "Ronde van Vlaanderen")
+        race_name: Name of the A-race (e.g. "Tour of Flanders")
         goal_ctl: Target CTL (fitness) needed at race day — see reference above
         recovery_cycle: Recovery week every N weeks — 3 for older/less experienced
                         athletes, 4 for younger/experienced athletes (default 4)
         additional_races: Optional B/C races, one per line as
                           "YYYY-MM-DD Name [A/B/C]"
-                          e.g. "2026-03-21 Dwars door V. C"
+                          e.g. "2026-03-21 Dwars door Vlaanderen [C]"
         athlete_id: The Intervals.icu athlete ID (optional)
         api_key: The Intervals.icu API key (optional)
     """
@@ -294,12 +295,12 @@ async def create_atp_plan(
     )
 
     current_ctl: float = 30.0  # fallback if no data
-    ctl_source = "onbekend (geen wellness-data)"
+    ctl_source = "unknown (no wellness data)"
     if isinstance(wellness_result, list) and wellness_result:
         for entry in reversed(wellness_result):
             if isinstance(entry, dict) and entry.get("ctl") is not None:
                 current_ctl = float(entry["ctl"])
-                ctl_source = f"{round(current_ctl, 1)} (uit wellness {entry.get('id', '')})"
+                ctl_source = f"{round(current_ctl, 1)} (from wellness {entry.get('id', '')})"
                 break
 
     # Weekly TSS in peak build weeks ≈ goal_ctl × 7
@@ -309,7 +310,7 @@ async def create_atp_plan(
     extra_races: list[dict] = []
     if additional_races:
         for line in additional_races.strip().splitlines():
-            parts = line.strip().split(None, 1)   # split on first space only: [date, rest]
+            parts = line.strip().split(None, 1)  # split on first space only: [date, rest]
             if len(parts) == 2:
                 name_part = parts[1].strip()
                 priority = "C"
@@ -375,15 +376,15 @@ async def create_atp_plan(
 
     phase_names = " → ".join(_PHASES[ph["name"]]["label"] for ph in phase_ranges)
     summary = [
-        f"ATP aangemaakt voor {race_name} ({race_date})",
-        f"Periode: {today_monday} – {race_monday + timedelta(days=6)} ({total_weeks} weken)",
-        f"Huidige CTL: {ctl_source}",
-        f"Doel-CTL: {goal_ctl}  →  TSS-doel piekweek: ~{goal_weekly_tss}",
-        f"Reden fasekeuze: {reason}",
-        f"Fasen: {phase_names}",
-        f"Herstelcyclus: elke {recovery_cycle} weken",
+        f"ATP created for {race_name} ({race_date})",
+        f"Period: {today_monday} – {race_monday + timedelta(days=6)} ({total_weeks} weeks)",
+        f"Current CTL: {ctl_source}",
+        f"Goal CTL: {goal_ctl}  →  Peak week TSS target: ~{goal_weekly_tss}",
+        f"Phase selection: {reason}",
+        f"Phases: {phase_names}",
+        f"Recovery cycle: every {recovery_cycle} weeks",
         "",
-        "Gepost op kalender:",
+        "Posted to calendar:",
     ] + posted_lines
 
     return "\n".join(summary)
@@ -439,11 +440,11 @@ async def get_atp_plan(
 
     if not notes:
         return (
-            f"Geen ATP-notities gevonden tussen {start_date} en {end_date}. "
-            "Gebruik create_atp_plan om een plan aan te maken."
+            f"No ATP notes found between {start_date} and {end_date}. "
+            "Use create_atp_plan to create a plan."
         )
 
-    lines = [f"ATP-overzicht ({start_date} – {end_date})\n"]
+    lines = [f"ATP overview ({start_date} – {end_date})\n"]
     for note in notes:
         name = note.get("name", "")
         s = (note.get("start_date_local") or "")[:10]
@@ -499,11 +500,11 @@ async def get_atp_week_note(
 
     if not notes:
         return (
-            f"Geen ATP-notitie gevonden voor week {monday} – {sunday}. "
-            "Gebruik create_atp_plan om het seizoen te structureren."
+            f"No ATP note found for week {monday} – {sunday}. "
+            "Use create_atp_plan to structure the season."
         )
 
-    lines = [f"ATP voor week {monday} – {sunday}:\n"]
+    lines = [f"ATP for week {monday} – {sunday}:\n"]
     for note in notes:
         name = note.get("name", "")
         desc = note.get("description", "")
@@ -583,10 +584,10 @@ async def get_planning_context(
     )
 
     week_list = week_events if isinstance(week_events, list) else []
-    sections: list[str] = [f"# Planningcontext: week {monday} – {sunday}\n"]
+    sections: list[str] = [f"# Planning context: week {monday} – {sunday}\n"]
 
     # ATP phase note
-    sections.append("## ATP-fase")
+    sections.append("## ATP phase")
     atp_notes = [e for e in week_list if e.get("category") == "NOTE"]
     if atp_notes:
         for n in atp_notes:
@@ -595,27 +596,30 @@ async def get_planning_context(
             sections.append(f"**{name}**\n{desc}" if name else desc)
     else:
         sections.append(
-            "Geen ATP-notitie voor deze week. Gebruik create_atp_plan om het seizoen te structureren."
+            "No ATP note for this week. Use create_atp_plan to structure the season."
         )
 
     # Fitness
-    sections.append("\n## Conditie (afgelopen 14 dagen)")
+    sections.append("\n## Current fitness (last 14 days)")
     if isinstance(wellness_result, list) and wellness_result:
-        latest = next((e for e in reversed(wellness_result) if isinstance(e, dict) and e.get("ctl") is not None), None)
+        latest = next(
+            (e for e in reversed(wellness_result) if isinstance(e, dict) and e.get("ctl") is not None),
+            None,
+        )
         if latest:
             ctl = latest.get("ctl")
             atl = latest.get("atl")
             tsb = round(ctl - atl, 1) if ctl is not None and atl is not None else None
             form = ""
             if tsb is not None:
-                form = " (uitgerust)" if tsb > 10 else (" (vermoeid)" if tsb < -10 else " (neutraal)")
+                form = " (fresh)" if tsb > 10 else (" (fatigued)" if tsb < -10 else " (neutral)")
             lines = []
             if ctl is not None:
                 lines.append(f"CTL (fitness): {round(ctl, 1)}")
             if atl is not None:
-                lines.append(f"ATL (vermoeidheid): {round(atl, 1)}")
+                lines.append(f"ATL (fatigue): {round(atl, 1)}")
             if tsb is not None:
-                lines.append(f"TSB (vorm): {tsb}{form}")
+                lines.append(f"TSB (form): {tsb}{form}")
             hrv = latest.get("hrv")
             if hrv is not None:
                 lines.append(f"HRV: {hrv}")
@@ -624,12 +628,12 @@ async def get_planning_context(
                 lines.append(f"Ramp rate: {round(ramp, 1)} CTL/week")
             sections.append("\n".join(lines))
         else:
-            sections.append("Geen CTL/ATL beschikbaar.")
+            sections.append("No CTL/ATL data available.")
     else:
-        sections.append("Geen wellness-data beschikbaar.")
+        sections.append("No wellness data available.")
 
     # Planned workouts
-    sections.append("\n## Geplande workouts deze week")
+    sections.append("\n## Planned workouts this week")
     workouts = [e for e in week_list if e.get("category") == "WORKOUT"]
     if workouts:
         for w in workouts:
@@ -640,22 +644,22 @@ async def get_planning_context(
             dur = f" ({int(mt) // 60} min)" if mt else ""
             sections.append(f"- {d} [{wtype}] {name}{dur}")
     else:
-        sections.append("Nog geen workouts ingepland.")
+        sections.append("No workouts scheduled yet.")
 
     # Upcoming races
-    sections.append("\n## Komende wedstrijden (120 dagen)")
+    sections.append("\n## Upcoming races (120 days)")
     if isinstance(races_result, list) and races_result:
         races = [e for e in races_result if e.get("category") in ("RACE_A", "RACE_B", "RACE_C")]
         if races:
             for r in races:
                 d = (r.get("start_date_local") or "")[:10]
-                name = r.get("name", "wedstrijd")
+                name = r.get("name", "race")
                 cat = r.get("category", "")
                 sections.append(f"- {d}: {name} [{cat}]")
         else:
-            sections.append("Geen wedstrijden gepland.")
+            sections.append("No races scheduled.")
     else:
-        sections.append("Geen wedstrijden gepland.")
+        sections.append("No races scheduled.")
 
     return "\n".join(sections)
 
@@ -682,7 +686,7 @@ async def add_race_event(
     - C: training race — treat as a hard training day
 
     Args:
-        name: Name of the race (e.g. "Ronde van Vlaanderen")
+        name: Name of the race (e.g. "Tour of Flanders")
         race_date: Date of the race in YYYY-MM-DD format
         priority: Race priority — A, B, or C (default A)
         start_time: Start time in HH:MM:SS format (default 10:00:00)
@@ -732,4 +736,4 @@ async def add_race_event(
 
     event_id = result.get("id") if isinstance(result, dict) else None
     id_str = f" (id: {event_id})" if event_id else ""
-    return f"Race '{name}' aangemaakt op {race_date} [RACE_{priority_upper}]{id_str}."
+    return f"Race '{name}' added on {race_date} [RACE_{priority_upper}]{id_str}."
