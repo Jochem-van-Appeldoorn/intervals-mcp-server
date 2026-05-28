@@ -734,6 +734,12 @@ async def add_race_event(
     if isinstance(result, dict) and "error" in result:
         return f"Error adding race: {result.get('message')}"
 
-    event_id = result.get("id") if isinstance(result, dict) else None
+    if not isinstance(result, dict):
+        return f"Unexpected response adding race: {result}"
+
+    event_id = result.get("id")
+    saved_category = result.get("category", "not returned")
     id_str = f" (id: {event_id})" if event_id else ""
-    return f"Race '{name}' added on {race_date} [RACE_{priority_upper}]{id_str}."
+    category_ok = saved_category == f"RACE_{priority_upper}"
+    category_note = "" if category_ok else f" — WARNING: API saved category as '{saved_category}', expected 'RACE_{priority_upper}'"
+    return f"Race '{name}' added on {race_date} [RACE_{priority_upper}]{id_str}.{category_note}"
