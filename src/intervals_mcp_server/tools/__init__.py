@@ -33,6 +33,12 @@ from intervals_mcp_server.tools.power_curves import (  # noqa: F401
 )
 from intervals_mcp_server.tools.gear import get_gear_list  # noqa: F401
 from intervals_mcp_server.tools.wellness import get_wellness_data  # noqa: F401
+from intervals_mcp_server.tools.planning import (  # noqa: F401
+    create_atp_plan,
+    get_atp_plan,
+    get_atp_week_note,
+    get_planning_context,
+)
 
 
 def register_tools(mcp_instance: FastMCP) -> None:
@@ -70,4 +76,8 @@ __all__ = [
     "get_athlete_power_curves",
     "get_gear_list",
     "get_wellness_data",
+    "create_atp_plan",
+    "get_atp_plan",
+    "get_atp_week_note",
+    "get_planning_context",
 ]
