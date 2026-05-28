@@ -114,7 +114,7 @@ def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> 
         prep_wks = 0
         base_wks = max(3, remaining // 2)
         build_wks = remaining - base_wks
-        if build_wks < 1:
+        if build_wks < 3:
             # remaining too small for both base and build — collapse to pure build
             return [("build", remaining)] + tail
 
@@ -158,9 +158,6 @@ def _monday_of(d: date) -> date:
 def _weeks_in(start: date, end: date) -> int:
     return max(1, ((end - start).days + 1 + 6) // 7)
 
-
-def _recovery_week_numbers(total_weeks: int, cycle: int) -> list[int]:
-    return [w for w in range(1, total_weeks + 1) if w % cycle == 0]
 
 
 def _week_tss(phase: str, goal_tss: int, week: int, total_weeks: int, cycle: int) -> str:
@@ -311,13 +308,21 @@ async def create_atp_plan(
     if additional_races:
         for line in additional_races.strip().splitlines():
             parts = line.strip().split(None, 1)  # split on first space only: [date, rest]
-            if len(parts) == 2:
-                name_part = parts[1].strip()
-                priority = "C"
-                if "[" in name_part:
-                    priority = name_part.split("[")[-1].strip("] ").upper()
-                    name_part = name_part.split("[")[0].strip()
-                extra_races.append({"date": parts[0], "name": name_part, "priority": priority})
+            if len(parts) != 2:
+                continue
+            raw_date, rest = parts[0], parts[1].strip()
+            try:
+                validate_date(raw_date)
+            except ValueError:
+                return f"Error: invalid date '{raw_date}' in additional_races. Use YYYY-MM-DD."
+            priority = "C"
+            name_part = rest
+            if "[" in rest:
+                priority = rest.split("[")[-1].strip("] ").upper()
+                name_part = rest.split("[")[0].strip()
+            if priority not in ("A", "B", "C"):
+                return f"Error: invalid priority '{priority}' for race '{name_part}'. Use A, B or C."
+            extra_races.append({"date": raw_date, "name": name_part, "priority": priority})
 
     # Determine phases
     phase_list = _determine_phases(total_weeks, current_ctl, float(goal_ctl))
@@ -436,7 +441,10 @@ async def get_atp_plan(
         return f"Error fetching ATP plan: {result.get('message')}"
 
     events = result if isinstance(result, list) else []
-    notes = [e for e in events if e.get("category") == "NOTE"]
+    notes = [
+        e for e in events
+        if e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
+    ]
 
     if not notes:
         return (
@@ -496,7 +504,10 @@ async def get_atp_week_note(
         return f"Error fetching events: {result.get('message')}"
 
     events = result if isinstance(result, list) else []
-    notes = [e for e in events if e.get("category") == "NOTE"]
+    notes = [
+        e for e in events
+        if e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
+    ]
 
     if not notes:
         return (
@@ -588,7 +599,10 @@ async def get_planning_context(
 
     # ATP phase note
     sections.append("## ATP phase")
-    atp_notes = [e for e in week_list if e.get("category") == "NOTE"]
+    atp_notes = [
+        e for e in week_list
+        if e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
+    ]
     if atp_notes:
         for n in atp_notes:
             name = n.get("name", "")
@@ -709,6 +723,12 @@ async def add_race_event(
     priority_upper = priority.strip().upper()
     if priority_upper not in ("A", "B", "C"):
         return "Error: priority must be A, B, or C."
+
+    from datetime import datetime as _dt
+    try:
+        _dt.strptime(start_time, "%H:%M:%S")
+    except ValueError:
+        return "Error: start_time must be in HH:MM:SS format (e.g. '10:00:00')."
 
     event_data: dict[str, Any] = {
         "category": f"RACE_{priority_upper}",
