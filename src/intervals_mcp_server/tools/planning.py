@@ -70,6 +70,17 @@ _PHASES: dict[str, dict[str, Any]] = {
     },
 }
 
+_ATP_PREFIX = "ATP"
+
+
+def _is_atp_note(e: object) -> bool:
+    return (
+        isinstance(e, dict)
+        and e.get("category") == "NOTE"  # type: ignore[union-attr]
+        and (e.get("name") or "").startswith(_ATP_PREFIX)  # type: ignore[union-attr]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase auto-selection logic (relative to goal CTL, not absolute thresholds)
 # ---------------------------------------------------------------------------
@@ -133,23 +144,30 @@ def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> 
 
 def _reason_for_phases(current_ctl: float, goal_ctl: float, total_weeks: int) -> str:
     ratio = current_ctl / max(goal_ctl, 1.0)
-    gap = round(goal_ctl - current_ctl)
+    goal_ctl_int = round(goal_ctl)
+    current_ctl_int = round(current_ctl)
+    gap = goal_ctl_int - current_ctl_int
     if total_weeks <= 5:
         phases = _determine_phases(total_weeks, current_ctl, goal_ctl)
         phase_seq = " → ".join(_PHASES[name]["label"] for name, _ in phases)
         return f"Only {total_weeks} weeks available — {phase_seq}."
+    if gap <= 0:
+        return (
+            f"CTL {current_ctl_int} already meets or exceeds goal CTL {goal_ctl_int} "
+            f"— going straight to build phase."
+        )
     if ratio >= 0.90:
         return (
-            f"CTL {round(current_ctl)} is close to goal CTL {goal_ctl} "
+            f"CTL {current_ctl_int} is close to goal CTL {goal_ctl_int} "
             f"(gap: {gap}) — going straight to build phase."
         )
     if ratio >= 0.70:
         return (
-            f"CTL {round(current_ctl)} is {gap} points below goal CTL {goal_ctl} "
+            f"CTL {current_ctl_int} is {gap} points below goal CTL {goal_ctl_int} "
             f"({round(ratio * 100)}%) — short base block followed by build phase."
         )
     return (
-        f"CTL {round(current_ctl)} is {gap} points below goal CTL {goal_ctl} "
+        f"CTL {current_ctl_int} is {gap} points below goal CTL {goal_ctl_int} "
         f"({round(ratio * 100)}%) — preparation and base block needed before build."
     )
 
@@ -331,6 +349,21 @@ async def create_atp_plan(
                 return f"Error: invalid priority '{priority}' for race '{name_part}'. Use A, B or C."
             extra_races.append({"date": raw_date, "name": name_part, "priority": priority})
 
+    # Delete any existing ATP notes in the plan window to avoid duplicates
+    plan_end = _monday_of(race_dt) + timedelta(days=6)
+    existing = await make_intervals_request(
+        url=f"/athlete/{athlete_id_to_use}/events",
+        api_key=api_key,
+        params={"oldest": today_monday.isoformat(), "newest": plan_end.isoformat()},
+    )
+    for ev in (existing if isinstance(existing, list) else []):
+        if _is_atp_note(ev) and isinstance(ev, dict) and ev.get("id"):
+            await make_intervals_request(
+                url=f"/athlete/{athlete_id_to_use}/events/{ev['id']}",
+                api_key=api_key,
+                method="DELETE",
+            )
+
     # Determine phases
     phase_list = _determine_phases(total_weeks, current_ctl, float(goal_ctl))
     reason = _reason_for_phases(current_ctl, float(goal_ctl), total_weeks)
@@ -450,7 +483,7 @@ async def get_atp_plan(
     events = result if isinstance(result, list) else []
     notes = [
         e for e in events
-        if isinstance(e, dict) and e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
+        if _is_atp_note(e)
     ]
 
     if not notes:
@@ -517,7 +550,7 @@ async def get_atp_week_note(
     events = result if isinstance(result, list) else []
     notes = [
         e for e in events
-        if isinstance(e, dict) and e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
+        if _is_atp_note(e)
     ]
 
     if not notes:
@@ -612,7 +645,7 @@ async def get_planning_context(
     sections.append("## ATP phase")
     atp_notes = [
         e for e in week_list
-        if isinstance(e, dict) and e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
+        if _is_atp_note(e)
     ]
     if atp_notes:
         for n in atp_notes:
