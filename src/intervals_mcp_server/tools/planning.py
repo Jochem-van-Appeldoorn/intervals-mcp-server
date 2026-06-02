@@ -354,13 +354,19 @@ async def create_atp_plan(
                 name_part, priority = rest, "C"
             extra_races.append({"date": raw_date, "name": name_part, "priority": priority})
 
-    # Delete any existing ATP notes in the plan window to avoid duplicates
+    # Fetch existing ATP notes now; delete them only after new ones are created
     plan_end = _monday_of(race_dt) + timedelta(days=6)
     existing = await make_intervals_request(
         url=f"/athlete/{athlete_id_to_use}/events",
         api_key=api_key,
         params={"oldest": today_monday.isoformat(), "newest": plan_end.isoformat()},
     )
+    old_ids = [
+        ev_id for ev in (existing if isinstance(existing, list) else [])
+        if _is_atp_note(ev) and isinstance(ev, dict)
+        for ev_id in (ev.get("id"),) if ev_id
+    ]
+
     _sem = asyncio.Semaphore(3)
 
     async def _delete(ev_id: str) -> None:
@@ -370,13 +376,6 @@ async def create_atp_plan(
                 api_key=api_key,
                 method="DELETE",
             )
-
-    to_delete = [
-        ev["id"] for ev in (existing if isinstance(existing, list) else [])
-        if _is_atp_note(ev) and isinstance(ev, dict) and ev.get("id")
-    ]
-    if to_delete:
-        await asyncio.gather(*(_delete(ev_id) for ev_id in to_delete))
 
     # Determine phases
     phase_list = _determine_phases(total_weeks, current_ctl, float(goal_ctl))
@@ -435,7 +434,7 @@ async def create_atp_plan(
         return_exceptions=True,
     )
 
-    # Rollback any created events if a failure occurred
+    # On any failure: rollback newly created events (old notes are still intact)
     created_ids = [
         r["id"] for r in post_results
         if isinstance(r, dict) and "id" in r and "error" not in r
@@ -445,7 +444,11 @@ async def create_atp_plan(
         await asyncio.gather(*(_delete(ev_id) for ev_id in created_ids))
         f = failed[0]
         err_msg = (f.get("message") or f.get("error") or str(f)) if isinstance(f, dict) else str(f)
-        return f"Error creating ATP plan (all changes rolled back): {err_msg}"
+        return f"Error creating ATP plan (rolled back, existing plan preserved): {err_msg}"
+
+    # All POSTs succeeded — now safe to remove the old notes
+    if old_ids:
+        await asyncio.gather(*(_delete(ev_id) for ev_id in old_ids))
 
     posted_lines: list[str] = []
     for (ph, _), _ in zip(phase_events, post_results):
@@ -663,19 +666,28 @@ async def get_planning_context(
     _fallback: list[Any] = []
     _api_warnings: list[str] = []
     _labels = ("wellness", "week events", "upcoming races")
+
+    def _is_failed(item: Any) -> bool:
+        return isinstance(item, Exception) or (isinstance(item, dict) and "error" in item)
+
+    def _warn_msg(item: Any) -> str:
+        if isinstance(item, dict):
+            return item.get("message") or item.get("error") or str(item)
+        return str(item)
+
     for _label, _raw_item in zip(_labels, _raw):
         if isinstance(_raw_item, asyncio.CancelledError):
             raise _raw_item
-        if isinstance(_raw_item, Exception):
-            _api_warnings.append(f"  • {_label}: {_raw_item}")
+        if _is_failed(_raw_item):
+            _api_warnings.append(f"  • {_label}: {_warn_msg(_raw_item)}")
     wellness_result: dict[str, Any] | list[dict[str, Any]] = (
-        _raw[0] if not isinstance(_raw[0], Exception) else _fallback
+        _raw[0] if not _is_failed(_raw[0]) else _fallback
     )
     week_events: dict[str, Any] | list[dict[str, Any]] = (
-        _raw[1] if not isinstance(_raw[1], Exception) else _fallback
+        _raw[1] if not _is_failed(_raw[1]) else _fallback
     )
     races_result: dict[str, Any] | list[dict[str, Any]] = (
-        _raw[2] if not isinstance(_raw[2], Exception) else _fallback
+        _raw[2] if not _is_failed(_raw[2]) else _fallback
     )
 
     week_list = week_events if isinstance(week_events, list) else []
