@@ -82,8 +82,12 @@ def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> 
     - UCI u23 rider targeting CTL 110 with current 70 → big gap → needs base
     - Gran fondo finisher targeting CTL 60 with current 50 → small gap → straight to build
     """
-    peak_wks = min(2, max(1, total_weeks // 7))
+    if total_weeks <= 1:
+        return [("race", total_weeks)]
     race_wks = 1
+    peak_wks = min(2, max(1, (total_weeks - race_wks) // 7))
+    if peak_wks + race_wks >= total_weeks:
+        peak_wks = total_weeks - race_wks
     remaining = total_weeks - peak_wks - race_wks
 
     tail = [("peak", peak_wks), ("race", race_wks)]
@@ -458,7 +462,11 @@ async def get_atp_plan(
     for note in notes:
         name = note.get("name", "")
         s = (note.get("start_date_local") or "")[:10]
-        e_end = (note.get("end_date_local") or note.get("start_date_local") or "")[:10]
+        e_end_raw = (note.get("end_date_local") or note.get("start_date_local") or "")[:10]
+        try:
+            e_end = (date.fromisoformat(e_end_raw) - timedelta(days=1)).isoformat() if e_end_raw else ""
+        except ValueError:
+            e_end = e_end_raw
         desc = note.get("description", "")
         lines.append(f"## {name}  ({s} – {e_end})")
         if desc:
@@ -603,7 +611,7 @@ async def get_planning_context(
     sections.append("## ATP phase")
     atp_notes = [
         e for e in week_list
-        if e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
+        if isinstance(e, dict) and e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
     ]
     if atp_notes:
         for n in atp_notes:
@@ -650,7 +658,7 @@ async def get_planning_context(
 
     # Planned workouts
     sections.append("\n## Planned workouts this week")
-    workouts = [e for e in week_list if e.get("category") == "WORKOUT"]
+    workouts = [e for e in week_list if isinstance(e, dict) and e.get("category") == "WORKOUT"]
     if workouts:
         for w in workouts:
             d = (w.get("start_date_local") or "")[:10]
@@ -665,7 +673,7 @@ async def get_planning_context(
     # Upcoming races
     sections.append("\n## Upcoming races (120 days)")
     if isinstance(races_result, list) and races_result:
-        races = [e for e in races_result if e.get("category") in ("RACE_A", "RACE_B", "RACE_C")]
+        races = [e for e in races_result if isinstance(e, dict) and e.get("category") in ("RACE_A", "RACE_B", "RACE_C")]
         if races:
             for r in races:
                 d = (r.get("start_date_local") or "")[:10]
