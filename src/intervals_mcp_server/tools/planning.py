@@ -361,13 +361,22 @@ async def create_atp_plan(
         api_key=api_key,
         params={"oldest": today_monday.isoformat(), "newest": plan_end.isoformat()},
     )
-    for ev in (existing if isinstance(existing, list) else []):
-        if _is_atp_note(ev) and isinstance(ev, dict) and ev.get("id"):
+    _sem = asyncio.Semaphore(3)
+
+    async def _delete(ev_id: str) -> None:
+        async with _sem:
             await make_intervals_request(
-                url=f"/athlete/{athlete_id_to_use}/events/{ev['id']}",
+                url=f"/athlete/{athlete_id_to_use}/events/{ev_id}",
                 api_key=api_key,
                 method="DELETE",
             )
+
+    to_delete = [
+        ev["id"] for ev in (existing if isinstance(existing, list) else [])
+        if _is_atp_note(ev) and isinstance(ev, dict) and ev.get("id")
+    ]
+    if to_delete:
+        await asyncio.gather(*(_delete(ev_id) for ev_id in to_delete))
 
     # Determine phases
     phase_list = _determine_phases(total_weeks, current_ctl, float(goal_ctl))
@@ -385,8 +394,9 @@ async def create_atp_plan(
         cursor = p_end + timedelta(days=1)
 
     total_phases = len(phase_ranges)
-    posted_lines: list[str] = []
 
+    # Build all event payloads up front (pure computation, no I/O)
+    phase_events: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for i, ph in enumerate(phase_ranges, start=1):
         phase_races = [r for r in extra_races if ph["start"].isoformat() <= r["date"] <= ph["end"].isoformat()]
         description = _build_phase_note(
@@ -401,7 +411,6 @@ async def create_atp_plan(
             race_date=race_dt,
             phase_races=phase_races,
         )
-
         event_data: dict[str, Any] = {
             "category": "NOTE",
             "name": f"ATP — {_PHASES[ph['name']]['label']}",
@@ -410,14 +419,35 @@ async def create_atp_plan(
             "end_date_local": (ph["end"] + timedelta(days=1)).isoformat() + "T00:00:00",
             "color": _PHASES[ph["name"]]["color"],
         }
+        phase_events.append((ph, event_data))
 
-        result = await make_intervals_request(
-            url=f"/athlete/{athlete_id_to_use}/events",
-            api_key=api_key,
-            data=event_data,
-            method="POST",
-        )
+    async def _post_phase(ph: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        async with _sem:
+            return await make_intervals_request(
+                url=f"/athlete/{athlete_id_to_use}/events",
+                api_key=api_key,
+                data=data,
+                method="POST",
+            )
 
+    post_results = await asyncio.gather(
+        *(_post_phase(ph, ev) for ph, ev in phase_events),
+        return_exceptions=True,
+    )
+
+    # Rollback any created events if a failure occurred
+    created_ids = [
+        r["id"] for r in post_results
+        if isinstance(r, dict) and "id" in r and "error" not in r
+    ]
+    failed = [r for r in post_results if isinstance(r, Exception) or (isinstance(r, dict) and "error" in r)]
+    if failed:
+        await asyncio.gather(*(_delete(ev_id) for ev_id in created_ids))
+        err_msg = failed[0].get("message") if isinstance(failed[0], dict) else str(failed[0])
+        return f"Error creating ATP plan (all changes rolled back): {err_msg}"
+
+    posted_lines: list[str] = []
+    for (ph, _), result in zip(phase_events, post_results):
         label = _PHASES[ph["name"]]["label"]
         if isinstance(result, dict) and "error" in result:
             posted_lines.append(f"  ✗ {label} ({ph['start']} – {ph['end']}): {result.get('message')}")
@@ -636,16 +666,18 @@ async def get_planning_context(
     _api_warnings: list[str] = []
     _labels = ("wellness", "week events", "upcoming races")
     for _label, _raw_item in zip(_labels, _raw):
-        if isinstance(_raw_item, BaseException):
+        if isinstance(_raw_item, asyncio.CancelledError):
+            raise _raw_item
+        if isinstance(_raw_item, Exception):
             _api_warnings.append(f"  • {_label}: {_raw_item}")
     wellness_result: dict[str, Any] | list[dict[str, Any]] = (
-        _raw[0] if not isinstance(_raw[0], BaseException) else _fallback
+        _raw[0] if not isinstance(_raw[0], Exception) else _fallback
     )
     week_events: dict[str, Any] | list[dict[str, Any]] = (
-        _raw[1] if not isinstance(_raw[1], BaseException) else _fallback
+        _raw[1] if not isinstance(_raw[1], Exception) else _fallback
     )
     races_result: dict[str, Any] | list[dict[str, Any]] = (
-        _raw[2] if not isinstance(_raw[2], BaseException) else _fallback
+        _raw[2] if not isinstance(_raw[2], Exception) else _fallback
     )
 
     week_list = week_events if isinstance(week_events, list) else []
