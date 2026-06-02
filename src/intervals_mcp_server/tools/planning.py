@@ -13,6 +13,7 @@ athlete's current fitness level:
 """
 
 import asyncio
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -295,6 +296,9 @@ async def create_atp_plan(
     except ValueError as e:
         return f"Error in race_date: {e}"
 
+    if goal_ctl < 1:
+        return "Error: goal_ctl must be at least 1."
+
     if recovery_cycle not in (3, 4):
         return "Error: recovery_cycle must be 3 or 4."
 
@@ -331,8 +335,11 @@ async def create_atp_plan(
     # Parse additional races
     extra_races: list[dict] = []
     if additional_races:
+        _trailing_priority = re.compile(r'^(.*?)\s*\[([A-Ca-c])\]\s*$')
         for line in additional_races.strip().splitlines():
-            parts = line.strip().split(None, 1)  # split on first space only: [date, rest]
+            if not line.strip():
+                continue
+            parts = line.strip().split(None, 1)  # split on first whitespace: [date, rest]
             if len(parts) != 2:
                 return f"Error: malformed additional_races line '{line.strip()}'. Expected format: 'YYYY-MM-DD Race name [A/B/C]'."
             raw_date, rest = parts[0], parts[1].strip()
@@ -340,13 +347,11 @@ async def create_atp_plan(
                 validate_date(raw_date)
             except ValueError:
                 return f"Error: invalid date '{raw_date}' in additional_races. Use YYYY-MM-DD."
-            priority = "C"
-            name_part = rest
-            if "[" in rest:
-                priority = rest.split("[")[-1].strip("] ").upper()
-                name_part = rest.split("[")[0].strip()
-            if priority not in ("A", "B", "C"):
-                return f"Error: invalid priority '{priority}' for race '{name_part}'. Use A, B or C."
+            m = _trailing_priority.match(rest)
+            if m:
+                name_part, priority = m.group(1).strip(), m.group(2).upper()
+            else:
+                name_part, priority = rest, "C"
             extra_races.append({"date": raw_date, "name": name_part, "priority": priority})
 
     # Delete any existing ATP notes in the plan window to avoid duplicates
@@ -628,6 +633,11 @@ async def get_planning_context(
         return_exceptions=True,
     )
     _fallback: list[Any] = []
+    _api_warnings: list[str] = []
+    _labels = ("wellness", "week events", "upcoming races")
+    for _label, _raw_item in zip(_labels, _raw):
+        if isinstance(_raw_item, BaseException):
+            _api_warnings.append(f"  • {_label}: {_raw_item}")
     wellness_result: dict[str, Any] | list[dict[str, Any]] = (
         _raw[0] if not isinstance(_raw[0], BaseException) else _fallback
     )
@@ -718,6 +728,10 @@ async def get_planning_context(
             sections.append("No races scheduled.")
     else:
         sections.append("No races scheduled.")
+
+    if _api_warnings:
+        sections.append("\n## ⚠ API fetch warnings (data may be incomplete)")
+        sections.extend(_api_warnings)
 
     return "\n".join(sections)
 
