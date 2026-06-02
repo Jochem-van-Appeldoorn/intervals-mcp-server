@@ -13,7 +13,7 @@ athlete's current fitness level:
 """
 
 import asyncio
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from intervals_mcp_server.api.client import make_intervals_request
@@ -85,9 +85,10 @@ def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> 
     if total_weeks <= 1:
         return [("race", total_weeks)]
     race_wks = 1
-    peak_wks = min(2, max(1, (total_weeks - race_wks) // 7))
-    if peak_wks + race_wks >= total_weeks:
-        peak_wks = total_weeks - race_wks
+    remaining_after_race = total_weeks - race_wks
+    peak_wks = 2 if remaining_after_race >= 4 else 1
+    if peak_wks >= remaining_after_race:
+        peak_wks = remaining_after_race
     remaining = total_weeks - peak_wks - race_wks
 
     tail = [("peak", peak_wks), ("race", race_wks)]
@@ -166,12 +167,12 @@ def _weeks_in(start: date, end: date) -> int:
 
 
 
-def _week_tss(phase: str, goal_tss: int, week: int, cycle: int, load_weeks: list[int]) -> str:
+def _week_tss(phase: str, goal_tss: int, week: int, cycle: int, load_week_idx: dict[int, int]) -> str:
     factor = _PHASES[phase]["tss_factor"]
     if week % cycle == 0:
         return f"~{round(goal_tss * factor * 0.60 / 50) * 50} TSS  ← recovery week"
-    idx = load_weeks.index(week) if week in load_weeks else 0
-    prog = 0.85 + 0.15 * (idx / max(len(load_weeks) - 1, 1))
+    idx = load_week_idx.get(week, 0)
+    prog = 0.85 + 0.15 * (idx / max(len(load_week_idx) - 1, 1))
     tss = round(goal_tss * factor * prog / 50) * 50
     return f"~{tss} TSS"
 
@@ -190,7 +191,7 @@ def _build_phase_note(
 ) -> str:
     p = _PHASES[phase]
     total_wks = _weeks_in(start, end)
-    load_weeks = [w for w in range(1, total_wks + 1) if w % cycle != 0]
+    load_week_idx = {w: i for i, w in enumerate(w for w in range(1, total_wks + 1) if w % cycle != 0)}
 
     lines = [
         f"Phase {phase_num}/{total_phases}: {p['label']}",
@@ -206,7 +207,7 @@ def _build_phase_note(
     for w in range(1, total_wks + 1):
         w_start = start + timedelta(weeks=w - 1)
         w_end = min(w_start + timedelta(days=6), end)
-        lines.append(f"  Week {w} ({w_start} – {w_end}): {_week_tss(phase, goal_tss, w, cycle, load_weeks)}")
+        lines.append(f"  Week {w} ({w_start} – {w_end}): {_week_tss(phase, goal_tss, w, cycle, load_week_idx)}")
 
     lines += ["", f"A-race: {race_name} ({race_date})"]
     if phase_races:
@@ -315,7 +316,7 @@ async def create_atp_plan(
         for line in additional_races.strip().splitlines():
             parts = line.strip().split(None, 1)  # split on first space only: [date, rest]
             if len(parts) != 2:
-                continue
+                return f"Error: malformed additional_races line '{line.strip()}'. Expected format: 'YYYY-MM-DD Race name [A/B/C]'."
             raw_date, rest = parts[0], parts[1].strip()
             try:
                 validate_date(raw_date)
@@ -734,9 +735,8 @@ async def add_race_event(
     if priority_upper not in ("A", "B", "C"):
         return "Error: priority must be A, B, or C."
 
-    from datetime import datetime as _dt
     try:
-        _dt.strptime(start_time, "%H:%M:%S")
+        datetime.strptime(start_time, "%H:%M:%S")
     except ValueError:
         return "Error: start_time must be in HH:MM:SS format (e.g. '10:00:00')."
 
