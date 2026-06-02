@@ -71,7 +71,7 @@ _PHASES: dict[str, dict[str, Any]] = {
     },
 }
 
-_ATP_PREFIX = "ATP"
+_ATP_PREFIX = "ATP — "
 
 
 def _is_atp_note(e: object) -> bool:
@@ -330,7 +330,7 @@ async def create_atp_plan(
                 break
 
     # Weekly TSS in peak build weeks ≈ goal_ctl × 7
-    goal_weekly_tss = round(goal_ctl * 7 / 50) * 50
+    goal_weekly_tss = max(50, round(goal_ctl * 7 / 50) * 50)
 
     # Parse additional races
     extra_races: list[dict] = []
@@ -443,16 +443,14 @@ async def create_atp_plan(
     failed = [r for r in post_results if isinstance(r, Exception) or (isinstance(r, dict) and "error" in r)]
     if failed:
         await asyncio.gather(*(_delete(ev_id) for ev_id in created_ids))
-        err_msg = failed[0].get("message") if isinstance(failed[0], dict) else str(failed[0])
+        f = failed[0]
+        err_msg = (f.get("message") or f.get("error") or str(f)) if isinstance(f, dict) else str(f)
         return f"Error creating ATP plan (all changes rolled back): {err_msg}"
 
     posted_lines: list[str] = []
-    for (ph, _), result in zip(phase_events, post_results):
+    for (ph, _), _ in zip(phase_events, post_results):
         label = _PHASES[ph["name"]]["label"]
-        if isinstance(result, dict) and "error" in result:
-            posted_lines.append(f"  ✗ {label} ({ph['start']} – {ph['end']}): {result.get('message')}")
-        else:
-            posted_lines.append(f"  ✓ {label}: {ph['start']} – {ph['end']} ({ph['weeks']} wk)")
+        posted_lines.append(f"  ✓ {label}: {ph['start']} – {ph['end']} ({ph['weeks']} wk)")
 
     phase_names = " → ".join(_PHASES[ph["name"]]["label"] for ph in phase_ranges)
     summary = [
