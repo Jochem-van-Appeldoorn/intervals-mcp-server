@@ -36,6 +36,7 @@ _PHASES: dict[str, dict[str, Any]] = {
         "intensity": "80% Z2, 15% sweet spot, 5% threshold.",
         "key_sessions": ["Long Z2 endurance rides", "Strength training", "Flexibility / technique"],
         "tss_factor": 0.60,
+        "recovery_factor": 0.60,
     },
     "base": {
         "label": "Base",
@@ -44,6 +45,7 @@ _PHASES: dict[str, dict[str, Any]] = {
         "intensity": "65% Z2, 25% sweet spot, 10% threshold.",
         "key_sessions": ["Long endurance rides (3–5 h)", "2× sweet spot per week", "1× threshold interval"],
         "tss_factor": 0.80,
+        "recovery_factor": 0.60,
     },
     "build": {
         "label": "Build",
@@ -52,6 +54,7 @@ _PHASES: dict[str, dict[str, Any]] = {
         "intensity": "40% Z2, 30% threshold, 30% VO2max / anaerobic.",
         "key_sessions": ["2× VO2max or threshold per week", "Long endurance ride", "Race simulation"],
         "tss_factor": 1.00,
+        "recovery_factor": 0.60,
     },
     "peak": {
         "label": "Peak",
@@ -60,6 +63,7 @@ _PHASES: dict[str, dict[str, Any]] = {
         "intensity": "50% Z2, 25% threshold, 25% VO2max — shorter intervals.",
         "key_sessions": ["Race-pace intervals", "Activation ride 2 days before race", "Rest day before race"],
         "tss_factor": 0.65,
+        "recovery_factor": 0.60,
     },
     "race": {
         "label": "Race",
@@ -68,10 +72,12 @@ _PHASES: dict[str, dict[str, Any]] = {
         "intensity": "Race + recovery rides.",
         "key_sessions": ["Activation ride the day before", "Race", "Active recovery afterwards"],
         "tss_factor": 0.50,
+        "recovery_factor": 0.60,
     },
 }
 
 _ATP_PREFIX = "ATP — "
+_TRAILING_PRIORITY_RE = re.compile(r'^(.*?)\s*\[([A-Ca-c])\]\s*$')
 
 
 def _is_atp_note(e: object) -> bool:
@@ -138,8 +144,10 @@ def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> 
     phases: list[tuple[str, int]] = []
     if prep_wks >= 2:
         phases.append(("preparation", prep_wks))
-    phases.append(("base", base_wks))
-    phases.append(("build", build_wks))
+    if base_wks > 0:
+        phases.append(("base", base_wks))
+    if build_wks > 0:
+        phases.append(("build", build_wks))
     return phases + tail
 
 
@@ -187,12 +195,14 @@ def _weeks_in(start: date, end: date) -> int:
 
 
 def _week_tss(phase: str, goal_tss: int, week: int, cycle: int, load_week_idx: dict[int, int]) -> str:
-    factor = _PHASES[phase]["tss_factor"]
+    p = _PHASES[phase]
+    factor = p["tss_factor"]
     if week % cycle == 0:
-        return f"~{round(goal_tss * factor * 0.60 / 50) * 50} TSS  ← recovery week"
+        tss = max(50, round(goal_tss * factor * p["recovery_factor"] / 50) * 50)
+        return f"~{tss} TSS  ← recovery week"
     idx = load_week_idx.get(week, 0)
     prog = 0.85 + 0.15 * (idx / max(len(load_week_idx) - 1, 1))
-    tss = round(goal_tss * factor * prog / 50) * 50
+    tss = max(50, round(goal_tss * factor * prog / 50) * 50)
     return f"~{tss} TSS"
 
 
@@ -303,7 +313,7 @@ async def create_atp_plan(
         return "Error: recovery_cycle must be 3 or 4."
 
     today = date.today()
-    if race_dt <= today:
+    if race_dt < today:
         return f"Error: race_date {race_date} is in the past. Provide a future date."
 
     today_monday = _monday_of(today)
@@ -335,7 +345,6 @@ async def create_atp_plan(
     # Parse additional races
     extra_races: list[dict] = []
     if additional_races:
-        _trailing_priority = re.compile(r'^(.*?)\s*\[([A-Ca-c])\]\s*$')
         for line in additional_races.strip().splitlines():
             if not line.strip():
                 continue
@@ -347,7 +356,7 @@ async def create_atp_plan(
                 validate_date(raw_date)
             except ValueError:
                 return f"Error: invalid date '{raw_date}' in additional_races. Use YYYY-MM-DD."
-            m = _trailing_priority.match(rest)
+            m = _TRAILING_PRIORITY_RE.match(rest)
             if m:
                 name_part, priority = m.group(1).strip(), m.group(2).upper()
             else:
@@ -362,9 +371,8 @@ async def create_atp_plan(
         params={"oldest": today_monday.isoformat(), "newest": plan_end.isoformat()},
     )
     old_ids = [
-        ev_id for ev in (existing if isinstance(existing, list) else [])
-        if _is_atp_note(ev) and isinstance(ev, dict)
-        for ev_id in (ev.get("id"),) if ev_id
+        ev.get("id") for ev in (existing if isinstance(existing, list) else [])
+        if _is_atp_note(ev) and isinstance(ev, dict) and ev.get("id")
     ]
 
     _sem = asyncio.Semaphore(3)
@@ -441,14 +449,20 @@ async def create_atp_plan(
     ]
     failed = [r for r in post_results if isinstance(r, Exception) or (isinstance(r, dict) and "error" in r)]
     if failed:
-        await asyncio.gather(*(_delete(ev_id) for ev_id in created_ids))
+        await asyncio.gather(*(_delete(ev_id) for ev_id in created_ids), return_exceptions=True)
         f = failed[0]
         err_msg = (f.get("message") or f.get("error") or str(f)) if isinstance(f, dict) else str(f)
         return f"Error creating ATP plan (rolled back, existing plan preserved): {err_msg}"
 
     # All POSTs succeeded — now safe to remove the old notes
     if old_ids:
-        await asyncio.gather(*(_delete(ev_id) for ev_id in old_ids))
+        delete_results = await asyncio.gather(*(_delete(ev_id) for ev_id in old_ids), return_exceptions=True)
+        delete_failures = [r for r in delete_results if isinstance(r, Exception)]
+        if delete_failures:
+            return (
+                f"ATP plan created but {len(delete_failures)} old note(s) could not be deleted "
+                f"(may cause duplicates): {delete_failures[0]}"
+            )
 
     posted_lines: list[str] = []
     for (ph, _), _ in zip(phase_events, post_results):
@@ -514,7 +528,7 @@ async def get_atp_plan(
     )
 
     if isinstance(result, dict) and "error" in result:
-        return f"Error fetching ATP plan: {result.get('message')}"
+        return f"Error fetching ATP plan: {result.get('message') or result.get('error') or str(result)}"
 
     events = result if isinstance(result, list) else []
     notes = [
@@ -851,7 +865,7 @@ async def add_race_event(
     )
 
     if isinstance(result, dict) and "error" in result:
-        return f"Error adding race: {result.get('message')}"
+        return f"Error adding race: {result.get('message') or result.get('error') or str(result)}"
 
     if not isinstance(result, dict):
         return f"Unexpected response adding race: {result}"
