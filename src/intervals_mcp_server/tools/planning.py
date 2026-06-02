@@ -130,7 +130,9 @@ def _reason_for_phases(current_ctl: float, goal_ctl: float, total_weeks: int) ->
     ratio = current_ctl / max(goal_ctl, 1.0)
     gap = round(goal_ctl - current_ctl)
     if total_weeks <= 5:
-        return f"Only {total_weeks} weeks available — going straight to peak phase."
+        phases = _determine_phases(total_weeks, current_ctl, goal_ctl)
+        phase_seq = " → ".join(_PHASES[name]["label"] for name, _ in phases)
+        return f"Only {total_weeks} weeks available — {phase_seq}."
     if ratio >= 0.90:
         return (
             f"CTL {round(current_ctl)} is close to goal CTL {goal_ctl} "
@@ -160,11 +162,10 @@ def _weeks_in(start: date, end: date) -> int:
 
 
 
-def _week_tss(phase: str, goal_tss: int, week: int, total_weeks: int, cycle: int) -> str:
+def _week_tss(phase: str, goal_tss: int, week: int, cycle: int, load_weeks: list[int]) -> str:
     factor = _PHASES[phase]["tss_factor"]
     if week % cycle == 0:
         return f"~{round(goal_tss * factor * 0.60 / 50) * 50} TSS  ← recovery week"
-    load_weeks = [w for w in range(1, total_weeks + 1) if w % cycle != 0]
     idx = load_weeks.index(week) if week in load_weeks else 0
     prog = 0.85 + 0.15 * (idx / max(len(load_weeks) - 1, 1))
     tss = round(goal_tss * factor * prog / 50) * 50
@@ -185,6 +186,7 @@ def _build_phase_note(
 ) -> str:
     p = _PHASES[phase]
     total_wks = _weeks_in(start, end)
+    load_weeks = [w for w in range(1, total_wks + 1) if w % cycle != 0]
 
     lines = [
         f"Phase {phase_num}/{total_phases}: {p['label']}",
@@ -200,7 +202,7 @@ def _build_phase_note(
     for w in range(1, total_wks + 1):
         w_start = start + timedelta(weeks=w - 1)
         w_end = min(w_start + timedelta(days=6), end)
-        lines.append(f"  Week {w} ({w_start} – {w_end}): {_week_tss(phase, goal_tss, w, total_wks, cycle)}")
+        lines.append(f"  Week {w} ({w_start} – {w_end}): {_week_tss(phase, goal_tss, w, cycle, load_weeks)}")
 
     lines += ["", f"A-race: {race_name} ({race_date})"]
     if phase_races:
@@ -362,7 +364,7 @@ async def create_atp_plan(
             "name": f"ATP — {_PHASES[ph['name']]['label']}",
             "description": description,
             "start_date_local": ph["start"].isoformat() + "T00:00:00",
-            "end_date_local": ph["end"].isoformat() + "T00:00:00",
+            "end_date_local": (ph["end"] + timedelta(days=1)).isoformat() + "T00:00:00",
             "color": _PHASES[ph["name"]]["color"],
         }
 
@@ -443,7 +445,7 @@ async def get_atp_plan(
     events = result if isinstance(result, list) else []
     notes = [
         e for e in events
-        if e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
+        if isinstance(e, dict) and e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
     ]
 
     if not notes:
@@ -506,7 +508,7 @@ async def get_atp_week_note(
     events = result if isinstance(result, list) else []
     notes = [
         e for e in events
-        if e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
+        if isinstance(e, dict) and e.get("category") == "NOTE" and (e.get("name") or "").startswith("ATP")
     ]
 
     if not notes:
@@ -740,7 +742,7 @@ async def add_race_event(
     if duration_minutes is not None:
         event_data["moving_time"] = duration_minutes * 60
     if distance_km is not None:
-        event_data["distance"] = int(distance_km * 1000)
+        event_data["distance"] = round(distance_km * 1000)
     if expected_tss is not None:
         event_data["icu_training_load"] = expected_tss
 
