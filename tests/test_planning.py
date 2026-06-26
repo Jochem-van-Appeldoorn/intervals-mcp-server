@@ -19,8 +19,11 @@ from intervals_mcp_server.tools.planning import (
     _assess_basis,
     _extract_30d_power,
     _determine_phases,
+    _basis_decision_note,
     _BASIS_20MIN_THRESHOLD,
     _BASIS_60MIN_THRESHOLD,
+    _BASE_SKIP_RATIO,
+    _BASE_SHORT_RATIO,
 )
 
 
@@ -149,30 +152,47 @@ import pytest
 
 
 class TestDeterminePhasesBasisPresent:
-    """basis_present=True: skip or shorten Base phase."""
+    """basis_present=True: three-tier Base selection."""
 
-    def test_basis_present_high_ratio_goes_to_build(self):
-        # ratio >= 0.70 + basis present → Build only (no Base)
+    def test_ratio_above_skip_threshold_no_base(self):
+        # ratio >= _BASE_SKIP_RATIO (0.70) → skip Base entirely
         phases = _determine_phases(20, current_ctl=80, goal_ctl=100, basis_present=True)
         names = [p for p, _ in phases]
         assert "base" not in names
         assert "build" in names
 
-    def test_basis_present_low_ratio_still_has_base(self):
-        # ratio < 0.70 + basis present → short Base then Build
-        phases = _determine_phases(20, current_ctl=50, goal_ctl=120, basis_present=True)
+    def test_ratio_exactly_at_skip_threshold_no_base(self):
+        # ratio == 0.70 exactly → still skip Base
+        phases = _determine_phases(20, current_ctl=70, goal_ctl=100, basis_present=True)
+        names = [p for p, _ in phases]
+        assert "base" not in names
+
+    def test_ratio_in_short_base_range_base_is_two_weeks(self):
+        # _BASE_SHORT_RATIO (0.50) <= ratio < _BASE_SKIP_RATIO (0.70) → 2-week Base
+        phases = _determine_phases(20, current_ctl=60, goal_ctl=100, basis_present=True)
         names = [p for p, _ in phases]
         assert "base" in names
-        assert "build" in names
-        # Base should be shorter than standard (≤ remaining // 3 equiv)
         base_wks = next(w for p, w in phases if p == "base")
-        build_wks = next(w for p, w in phases if p == "build")
-        # Short base: base_wks <= build_wks (build dominates)
-        assert build_wks >= base_wks
+        assert base_wks == 2
 
-    def test_basis_present_no_preparation_phase(self):
-        # Even with low ratio, basis_present skips Preparation
-        phases = _determine_phases(30, current_ctl=40, goal_ctl=120, basis_present=True)
+    def test_ratio_exactly_at_short_base_threshold(self):
+        # ratio == 0.50 → short Base (2 wk), not full
+        phases = _determine_phases(20, current_ctl=50, goal_ctl=100, basis_present=True)
+        base_wks = next(w for p, w in phases if p == "base")
+        assert base_wks == 2
+
+    def test_ratio_below_short_base_threshold_full_base(self):
+        # ratio < _BASE_SHORT_RATIO (0.50) → full Base (>= 3 wk), no Preparation
+        phases = _determine_phases(20, current_ctl=40, goal_ctl=120, basis_present=True)
+        names = [p for p, _ in phases]
+        assert "base" in names
+        assert "preparation" not in names
+        base_wks = next(w for p, w in phases if p == "base")
+        assert base_wks >= 3
+
+    def test_basis_present_never_adds_preparation(self):
+        # Even with very low ratio, basis_present should never produce Preparation
+        phases = _determine_phases(30, current_ctl=30, goal_ctl=120, basis_present=True)
         names = [p for p, _ in phases]
         assert "preparation" not in names
 
@@ -256,3 +276,36 @@ class TestDeterminePhasesEdgeCases:
             for total in (8, 16, 24, 32):
                 phases = _determine_phases(total, 60.0, 120.0, basis_present=basis)
                 assert sum(w for _, w in phases) == total
+
+
+# ---------------------------------------------------------------------------
+# _basis_decision_note
+# ---------------------------------------------------------------------------
+
+class TestBasisDecisionNote:
+    def test_skip_ratio_returns_skip_message(self):
+        note = _basis_decision_note(True, _BASE_SKIP_RATIO)
+        assert note is not None
+        assert "skipping Base entirely" in note
+
+    def test_above_skip_ratio(self):
+        note = _basis_decision_note(True, _BASE_SKIP_RATIO + 0.10)
+        assert note is not None
+        assert "skipping Base entirely" in note
+
+    def test_short_base_range(self):
+        ratio = (_BASE_SHORT_RATIO + _BASE_SKIP_RATIO) / 2  # midpoint
+        note = _basis_decision_note(True, ratio)
+        assert note is not None
+        assert "short Base" in note
+
+    def test_below_short_ratio_full_base(self):
+        note = _basis_decision_note(True, _BASE_SHORT_RATIO - 0.10)
+        assert note is not None
+        assert "full Base" in note
+
+    def test_basis_absent_returns_none(self):
+        assert _basis_decision_note(False, 0.80) is None
+
+    def test_basis_none_returns_none(self):
+        assert _basis_decision_note(None, 0.80) is None

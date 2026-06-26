@@ -84,6 +84,10 @@ _TRAILING_PRIORITY_RE = re.compile(r'^(.*?)\s*\[([A-Ca-c])\]\s*$')
 _BASIS_20MIN_THRESHOLD: float = 0.85  # 20-min power must be >= ftp * this
 _BASIS_60MIN_THRESHOLD: float = 0.75  # 60-min power must be >= ftp * this
 
+# CTL-ratio thresholds used inside the basis_present=True branch.
+_BASE_SKIP_RATIO: float = 0.70   # at or above: skip Base entirely → straight to Build
+_BASE_SHORT_RATIO: float = 0.50  # at or above (but below SKIP): 2-week Base, then Build
+
 
 def _is_atp_note(e: object) -> bool:
     return (
@@ -300,12 +304,19 @@ def _determine_phases(
 
     # ---- Basis-aware branch ----------------------------------------
     if basis_present is True:
-        if ratio >= 0.70:
-            # Basis confirmed + CTL close enough → skip base, go straight to build
+        if ratio >= _BASE_SKIP_RATIO:
+            # Strong basis + small CTL gap → skip Base entirely
             return [("build", remaining)] + tail
+        elif ratio >= _BASE_SHORT_RATIO:
+            # Strong basis but moderate CTL gap → fixed 2-week Base for volume ramp
+            base_wks = 2
+            build_wks = remaining - base_wks
+            if build_wks < 3:
+                return [("build", remaining)] + tail
+            return [("base", base_wks), ("build", build_wks)] + tail
         else:
-            # Big CTL gap but basis is there → short base to ramp volume, then build
-            base_wks = max(2, remaining // 4)
+            # Strong basis but very large CTL gap → full Base (Preparation not needed)
+            base_wks = max(3, remaining // 3)
             build_wks = remaining - base_wks
             if build_wks < 3:
                 return [("build", remaining)] + tail
@@ -356,6 +367,17 @@ def _determine_phases(
     return phases + tail
 
 
+def _basis_decision_note(basis_present: bool | None, ratio: float) -> str | None:
+    """Return a short descriptive prefix for the Decision line, or None for the default."""
+    if basis_present is not True:
+        return None
+    if ratio >= _BASE_SKIP_RATIO:
+        return "skipping Base entirely"
+    if ratio >= _BASE_SHORT_RATIO:
+        return "basis present, CTL gap large → short Base (2 wk)"
+    return "basis present, CTL gap very large → full Base, no Preparation"
+
+
 def _phase_selection_summary(
     current_ctl: float,
     goal_ctl: float,
@@ -372,10 +394,11 @@ def _phase_selection_summary(
     goal_ctl_int = round(goal_ctl)
     current_ctl_int = round(current_ctl)
     gap = goal_ctl_int - current_ctl_int
+    ratio = current_ctl / max(goal_ctl, 1.0)
     phase_seq = " → ".join(_PHASES[name]["label"] for name, _ in phase_list)
 
     lines = [
-        f"  Current CTL: {current_ctl_int} (goal: {goal_ctl_int}, gap: {gap} pts)",
+        f"  Current CTL: {current_ctl_int} (goal: {goal_ctl_int}, gap: {gap} pts, ratio: {round(ratio * 100)}%)",
     ]
 
     # Power curve line
@@ -397,9 +420,7 @@ def _phase_selection_summary(
 
     # Basis assessment line
     if basis_present is True:
-        lines.append(
-            f"  Basis assessment: PRESENT — strong 20min and 60min values in last 30 days"
-        )
+        lines.append("  Basis assessment: PRESENT — strong 20min and 60min values in last 30 days")
     elif basis_present is False:
         if power_20min is None and power_60min is None:
             lines.append("  Basis assessment: ABSENT — no recent riding detected")
@@ -411,7 +432,9 @@ def _phase_selection_summary(
     else:
         lines.append("  Basis assessment: N/A — no power curve data, using CTL-gap only")
 
-    lines.append(f"  Decision: {phase_seq}")
+    note = _basis_decision_note(basis_present, ratio)
+    decision = f"{note} → {phase_seq}" if note else phase_seq
+    lines.append(f"  Decision: {decision}")
     return "\n".join(lines)
 
 
