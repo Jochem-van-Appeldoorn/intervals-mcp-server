@@ -5,6 +5,7 @@ Covers:
 - _assess_basis: all scenarios (present, absent, no data, no FTP)
 - _extract_30d_power: valid response, empty response, missing durations
 - _determine_phases with basis_present=True/False/None
+- next-Monday start-date logic
 """
 
 import os
@@ -301,3 +302,45 @@ class TestBasisDecisionNote:
             for ratio in (0.30, 0.70, 0.95):
                 note = _basis_decision_note(bp, ratio)
                 assert isinstance(note, str) and len(note) > 0
+
+
+# ---------------------------------------------------------------------------
+# Next-Monday start-date logic
+# ---------------------------------------------------------------------------
+
+from datetime import date, timedelta
+
+
+def _next_monday(today: date) -> date:
+    """Mirror the logic used in create_atp_plan."""
+    days_ahead = (7 - today.weekday()) % 7 or 7
+    return today + timedelta(days=days_ahead)
+
+
+class TestNextMondayStart:
+    def test_thursday_returns_next_monday(self):
+        thursday = date(2026, 6, 25)  # weekday() == 3
+        assert thursday.weekday() == 3
+        result = _next_monday(thursday)
+        assert result == date(2026, 6, 29)
+        assert result.weekday() == 0
+
+    def test_monday_returns_following_monday(self):
+        monday = date(2026, 6, 22)  # weekday() == 0
+        assert monday.weekday() == 0
+        result = _next_monday(monday)
+        assert result == date(2026, 6, 29)
+        assert result.weekday() == 0
+
+    def test_sunday_returns_tomorrow(self):
+        sunday = date(2026, 6, 28)  # weekday() == 6
+        result = _next_monday(sunday)
+        assert result == date(2026, 6, 29)
+        assert result.weekday() == 0
+
+    def test_result_is_always_in_the_future(self):
+        for offset in range(7):
+            today = date(2026, 6, 22) + timedelta(days=offset)
+            result = _next_monday(today)
+            assert result > today
+            assert result.weekday() == 0

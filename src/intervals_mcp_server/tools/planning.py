@@ -607,7 +607,8 @@ async def create_atp_plan(
     if race_dt < today:
         return f"Error: race_date {race_date} is in the past. Provide a future date."
 
-    today_monday = _monday_of(today)
+    days_ahead = (7 - today.weekday()) % 7 or 7  # next Monday, never today
+    today_monday = today + timedelta(days=days_ahead)
     race_monday = _monday_of(race_dt)
     total_weeks = max(1, (race_monday - today_monday).days // 7 + 1)
 
