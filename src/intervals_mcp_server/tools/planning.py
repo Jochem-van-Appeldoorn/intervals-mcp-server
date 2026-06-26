@@ -79,6 +79,11 @@ _PHASES: dict[str, dict[str, Any]] = {
 _ATP_PREFIX = "ATP — "
 _TRAILING_PRIORITY_RE = re.compile(r'^(.*?)\s*\[([A-Ca-c])\]\s*$')
 
+# Thresholds for aerobic basis assessment via 30-day power curve.
+# Adjust these constants to tune how strict the basis check is.
+_BASIS_20MIN_THRESHOLD: float = 0.85  # 20-min power must be >= ftp * this
+_BASIS_60MIN_THRESHOLD: float = 0.75  # 60-min power must be >= ftp * this
+
 
 def _is_atp_note(e: object) -> bool:
     return (
@@ -199,16 +204,79 @@ def _build_extra_sports_sections(phase: str, sports: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Aerobic basis assessment via 30-day power curve
+# ---------------------------------------------------------------------------
+
+def _extract_30d_power(
+    curve_result: Any,
+) -> tuple[float | None, float | None]:
+    """Extract 20-min (1200 s) and 60-min (3600 s) best power from a power-curves API response."""
+    if not isinstance(curve_result, dict):
+        return None, None
+    curve_list: list[dict[str, Any]] = curve_result.get("list", [])
+    if not curve_list:
+        return None, None
+    curve = curve_list[0]
+    secs: list[int] = curve.get("secs", [])
+    values: list[Any] = curve.get("values", [])
+    sec_to_idx = {s: i for i, s in enumerate(secs)}
+
+    def _get(duration: int) -> float | None:
+        idx = sec_to_idx.get(duration)
+        if idx is None or idx >= len(values):
+            return None
+        v = values[idx]
+        return float(v) if v is not None else None
+
+    return _get(1200), _get(3600)
+
+
+def _assess_basis(
+    power_20min: float | None,
+    power_60min: float | None,
+    ftp: int | None,
+) -> tuple[bool | None, float | None, float | None, float | None]:
+    """Determine whether the aerobic basis is present from the 30-day power curve.
+
+    Returns (basis_present, ftp_ref, ratio_20min, ratio_60min).
+    basis_present=None means insufficient data to make a determination.
+    """
+    if power_20min is None and power_60min is None:
+        return None, None, None, None
+
+    ftp_ref: float
+    if ftp is not None:
+        ftp_ref = float(ftp)
+    elif power_20min is not None:
+        ftp_ref = power_20min * 0.95  # standard 20-min proxy
+    else:
+        return None, None, None, None
+
+    ratio_20 = power_20min / ftp_ref if power_20min is not None else None
+    ratio_60 = power_60min / ftp_ref if power_60min is not None else None
+
+    meets_20 = ratio_20 is not None and ratio_20 >= _BASIS_20MIN_THRESHOLD
+    meets_60 = ratio_60 is not None and ratio_60 >= _BASIS_60MIN_THRESHOLD
+    return meets_20 and meets_60, ftp_ref, ratio_20, ratio_60
+
+
+# ---------------------------------------------------------------------------
 # Phase auto-selection logic (relative to goal CTL, not absolute thresholds)
 # ---------------------------------------------------------------------------
 
 
-def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> list[tuple[str, int]]:
-    """Return ordered (phase_name, weeks) based on available weeks and CTL gap.
+def _determine_phases(
+    total_weeks: int,
+    current_ctl: float,
+    goal_ctl: float,
+    basis_present: bool | None = None,
+) -> list[tuple[str, int]]:
+    """Return ordered (phase_name, weeks) based on available weeks, CTL gap, and aerobic basis.
 
-    Uses the ratio current_ctl / goal_ctl so thresholds scale with the event:
-    - UCI u23 rider targeting CTL 110 with current 70 → big gap → needs base
-    - Gran fondo finisher targeting CTL 60 with current 50 → small gap → straight to build
+    basis_present=True  → skip or shorten Base when power curve shows the athlete
+                          has been riding at threshold level in the last 30 days.
+    basis_present=False → add Base even when CTL ratio would normally skip it.
+    basis_present=None  → fall back to CTL-gap-only logic (original behaviour).
     """
     if total_weeks <= 1:
         return [("race", total_weeks)]
@@ -226,8 +294,36 @@ def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> 
 
     ratio = current_ctl / max(goal_ctl, 1.0)
 
-    if remaining <= 4 or ratio >= 0.90:
-        # Almost at goal CTL or very little time → straight to build
+    # Short plans: always collapse to pure build regardless of basis signal
+    if remaining <= 4:
+        return [("build", remaining)] + tail
+
+    # ---- Basis-aware branch ----------------------------------------
+    if basis_present is True:
+        if ratio >= 0.70:
+            # Basis confirmed + CTL close enough → skip base, go straight to build
+            return [("build", remaining)] + tail
+        else:
+            # Big CTL gap but basis is there → short base to ramp volume, then build
+            base_wks = max(2, remaining // 4)
+            build_wks = remaining - base_wks
+            if build_wks < 3:
+                return [("build", remaining)] + tail
+            return [("base", base_wks), ("build", build_wks)] + tail
+
+    if basis_present is False:
+        if ratio >= 0.70:
+            # CTL looks fine but no recent riding → add a base block anyway
+            base_wks = max(3, remaining // 3)
+            build_wks = remaining - base_wks
+            if build_wks < 3:
+                return [("build", remaining)] + tail
+            return [("base", base_wks), ("build", build_wks)] + tail
+        # ratio < 0.70 falls through to the original large-gap logic below
+
+    # ---- Original CTL-gap-only logic (basis_present=None, or False+large gap) --
+    if ratio >= 0.90:
+        # Almost at goal CTL → straight to build
         return [("build", remaining)] + tail
 
     if ratio >= 0.70:
@@ -248,7 +344,6 @@ def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> 
         base_wks = max(3, remaining // 2)
         build_wks = remaining - base_wks
         if build_wks < 3:
-            # remaining too small for both base and build — collapse to pure build
             return [("build", remaining)] + tail
 
     phases: list[tuple[str, int]] = []
@@ -261,34 +356,63 @@ def _determine_phases(total_weeks: int, current_ctl: float, goal_ctl: float) -> 
     return phases + tail
 
 
-def _reason_for_phases(current_ctl: float, goal_ctl: float, total_weeks: int) -> str:
-    ratio = current_ctl / max(goal_ctl, 1.0)
+def _phase_selection_summary(
+    current_ctl: float,
+    goal_ctl: float,
+    total_weeks: int,
+    phase_list: list[tuple[str, int]],
+    power_20min: float | None = None,
+    power_60min: float | None = None,
+    ftp_ref: float | None = None,
+    ratio_20min: float | None = None,
+    ratio_60min: float | None = None,
+    basis_present: bool | None = None,
+) -> str:
+    """Return a multi-line phase-selection explanation for the tool summary."""
     goal_ctl_int = round(goal_ctl)
     current_ctl_int = round(current_ctl)
     gap = goal_ctl_int - current_ctl_int
-    if total_weeks <= 5:
-        phases = _determine_phases(total_weeks, current_ctl, goal_ctl)
-        phase_seq = " → ".join(_PHASES[name]["label"] for name, _ in phases)
-        return f"Only {total_weeks} weeks available — {phase_seq}."
-    if gap <= 0:
-        return (
-            f"CTL {current_ctl_int} already meets or exceeds goal CTL {goal_ctl_int} "
-            f"— going straight to build phase."
+    phase_seq = " → ".join(_PHASES[name]["label"] for name, _ in phase_list)
+
+    lines = [
+        f"  Current CTL: {current_ctl_int} (goal: {goal_ctl_int}, gap: {gap} pts)",
+    ]
+
+    # Power curve line
+    if power_20min is None and power_60min is None:
+        lines.append("  Power curve (last 30 days): no recent data (last activity > 30 days ago)")
+    else:
+        ftp_str = f" | FTP ref: {round(ftp_ref)}W" if ftp_ref is not None else ""
+        p20_str = (
+            f"20min = {round(power_20min)}W ({round(ratio_20min * 100)}% of FTP ref)"
+            if power_20min is not None and ratio_20min is not None
+            else "20min = n/a"
         )
-    if ratio >= 0.90:
-        return (
-            f"CTL {current_ctl_int} is close to goal CTL {goal_ctl_int} "
-            f"(gap: {gap}) — going straight to build phase."
+        p60_str = (
+            f"60min = {round(power_60min)}W ({round(ratio_60min * 100)}% of FTP ref)"
+            if power_60min is not None and ratio_60min is not None
+            else "60min = n/a"
         )
-    if ratio >= 0.70:
-        return (
-            f"CTL {current_ctl_int} is {gap} points below goal CTL {goal_ctl_int} "
-            f"({round(ratio * 100)}%) — short base block followed by build phase."
+        lines.append(f"  Power curve (last 30 days): {p20_str}, {p60_str}{ftp_str}")
+
+    # Basis assessment line
+    if basis_present is True:
+        lines.append(
+            f"  Basis assessment: PRESENT — strong 20min and 60min values in last 30 days"
         )
-    return (
-        f"CTL {current_ctl_int} is {gap} points below goal CTL {goal_ctl_int} "
-        f"({round(ratio * 100)}%) — preparation and base block needed before build."
-    )
+    elif basis_present is False:
+        if power_20min is None and power_60min is None:
+            lines.append("  Basis assessment: ABSENT — no recent riding detected")
+        else:
+            lines.append(
+                f"  Basis assessment: ABSENT — 20min/60min below threshold "
+                f"(need ≥{round(_BASIS_20MIN_THRESHOLD * 100)}% / ≥{round(_BASIS_60MIN_THRESHOLD * 100)}% of FTP ref)"
+            )
+    else:
+        lines.append("  Basis assessment: N/A — no power curve data, using CTL-gap only")
+
+    lines.append(f"  Decision: {phase_seq}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -493,14 +617,28 @@ async def create_atp_plan(
     race_monday = _monday_of(race_dt)
     total_weeks = max(1, (race_monday - today_monday).days // 7 + 1)
 
-    # Fetch current CTL from wellness
-    wellness_result = await make_intervals_request(
-        url=f"/athlete/{athlete_id_to_use}/wellness",
-        api_key=api_key,
-        params={
-            "oldest": (today - timedelta(days=7)).isoformat(),
-            "newest": today.isoformat(),
-        },
+    # Fetch CTL (wellness) and 30-day power curve in parallel
+    curve_start = (today - timedelta(days=30)).isoformat()
+    curve_end = today.isoformat()
+    wellness_result, curve_result = await asyncio.gather(
+        make_intervals_request(
+            url=f"/athlete/{athlete_id_to_use}/wellness",
+            api_key=api_key,
+            params={
+                "oldest": (today - timedelta(days=7)).isoformat(),
+                "newest": today.isoformat(),
+            },
+        ),
+        make_intervals_request(
+            url=f"/athlete/{athlete_id_to_use}/power-curves",
+            api_key=api_key,
+            params={
+                "curves": [f"r.{curve_start}.{curve_end}"],
+                "type": "Ride",
+                "includeRanks": False,
+            },
+        ),
+        return_exceptions=True,
     )
 
     current_ctl: float = 30.0  # fallback if no data
@@ -511,6 +649,13 @@ async def create_atp_plan(
                 current_ctl = float(entry["ctl"])
                 ctl_source = f"{round(current_ctl, 1)} (from wellness {entry.get('id', '')})"
                 break
+
+    # Assess aerobic basis from power curve; fall back gracefully on any error
+    power_20min: float | None = None
+    power_60min: float | None = None
+    if not isinstance(curve_result, Exception):
+        power_20min, power_60min = _extract_30d_power(curve_result)
+    basis_present, ftp_ref, ratio_20min, ratio_60min = _assess_basis(power_20min, power_60min, ftp)
 
     # Weekly TSS in peak build weeks ≈ goal_ctl × 7
     goal_weekly_tss = max(50, round(goal_ctl * 7 / 50) * 50)
@@ -576,9 +721,20 @@ async def create_atp_plan(
                 method="DELETE",
             )
 
-    # Determine phases
-    phase_list = _determine_phases(total_weeks, current_ctl, float(goal_ctl))
-    reason = _reason_for_phases(current_ctl, float(goal_ctl), total_weeks)
+    # Determine phases (basis_present=None falls back to CTL-gap-only logic)
+    phase_list = _determine_phases(total_weeks, current_ctl, float(goal_ctl), basis_present)
+    phase_selection = _phase_selection_summary(
+        current_ctl=current_ctl,
+        goal_ctl=float(goal_ctl),
+        total_weeks=total_weeks,
+        phase_list=phase_list,
+        power_20min=power_20min,
+        power_60min=power_60min,
+        ftp_ref=ftp_ref,
+        ratio_20min=ratio_20min,
+        ratio_60min=ratio_60min,
+        basis_present=basis_present,
+    )
 
     # Calculate date ranges (forward from today)
     cursor = today_monday
@@ -670,7 +826,7 @@ async def create_atp_plan(
         f"Period: {today_monday} – {race_monday + timedelta(days=6)} ({total_weeks} weeks)",
         f"Current CTL: {ctl_source}",
         f"Goal CTL: {goal_ctl}  →  Peak week TSS target: ~{goal_weekly_tss}{tss_sport_note}{tss_hours_note}",
-        f"Phase selection: {reason}",
+        f"Phase selection:\n{phase_selection}",
         f"Phases: {phase_names}",
         f"Recovery cycle: every {recovery_cycle} weeks",
     ]
