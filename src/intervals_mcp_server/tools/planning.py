@@ -89,6 +89,116 @@ def _is_atp_note(e: object) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Power zone, strength, and multi-sport helpers
+# ---------------------------------------------------------------------------
+
+def _ftp_power_ranges(ftp: int) -> dict[str, str]:
+    return {
+        "sweet spot": f"{round(ftp * 0.88)}–{round(ftp * 0.93)} W",
+        "threshold": f"{round(ftp * 0.95)}–{round(ftp * 1.05)} W",
+        "vo2max": f"{round(ftp * 1.06)}–{round(ftp * 1.20)} W",
+    }
+
+
+def _annotate_sessions_with_power(sessions: list[str], ftp: int) -> list[str]:
+    ranges = _ftp_power_ranges(ftp)
+    result = []
+    for s in sessions:
+        s_lower = s.lower()
+        for keyword, watt_range in ranges.items():
+            if keyword in s_lower and " W" not in s:
+                s = re.sub(r"\s+per week$", "", s, flags=re.IGNORECASE).strip()
+                s = f"{s} ({watt_range})"
+                break
+        result.append(s)
+    return result
+
+
+def _build_strength_section(phase: str, strength: dict[str, Any]) -> list[str]:
+    if phase == "race":
+        return []
+
+    sessions_per_week: int = strength.get("sessions_per_week", 0)
+    duration: int = strength.get("session_duration_minutes", 0)
+    equipment: list[str] = strength.get("equipment", [])
+    all_blocks: list[dict[str, Any]] = strength.get("blocks", [])
+
+    if phase == "peak":
+        active_sessions = strength.get("peak_phase_sessions", sessions_per_week)
+        peak_block_names: list[str] = strength.get("peak_phase_blocks", [])
+        active_blocks = (
+            [b for b in all_blocks if any(b.get("name", "").startswith(n) for n in peak_block_names)]
+            if peak_block_names else all_blocks
+        )
+        header = f"Strength ({active_sessions}x/week, ~{duration} min — peak phase, reduced):"
+        show_recovery_note = False
+    else:
+        active_sessions = sessions_per_week
+        active_blocks = all_blocks
+        eq_str = f", equipment: {', '.join(equipment)}" if equipment else ""
+        header = f"Strength ({active_sessions}x/week, ~{duration} min{eq_str}):"
+        show_recovery_note = "recovery_week_sessions" in strength
+
+    lines = [header]
+    for block in active_blocks:
+        name = block.get("name", "")
+        spw = block.get("sessions_per_week", "")
+        exercises: list[str] = block.get("exercises", [])
+        freq_str = f" ({spw}x/week)" if spw else ""
+        lines.append(f"  {name}{freq_str}:")
+        lines.append(f"    {', '.join(exercises)}")
+
+    if show_recovery_note:
+        rec_sessions: int = strength["recovery_week_sessions"]
+        rec_blocks: list[str] = strength.get("recovery_week_blocks", [])
+        block_str = ", ".join(rec_blocks) if rec_blocks else "all blocks"
+        lines.append(f"  Recovery week: {block_str} only, {rec_sessions}x")
+
+    return lines
+
+
+_GENERIC_STRENGTH_PHASE: dict[str, str] = {
+    "preparation": "2–3× per week. Core, functional strength. Keep sessions short (20–30 min).",
+    "base": "2–3× per week. Core, functional strength. Keep sessions short (20–30 min).",
+    "build": "2× per week. Maintenance. Core and stability only.",
+    "peak": "2× per week, core/stability only. Skip heavy lifts.",
+    "race": "No strength training — rest and race.",
+}
+
+_SPORT_PHASE_GUIDANCE: dict[str, dict[str, str]] = {
+    "running": {
+        "preparation": "2× per week, easy Z2 runs (30–45 min). Focus on running form and consistency.",
+        "base": "2–3× per week, Z2 easy runs (45–60 min). Build aerobic base.",
+        "build": "2–3× per week, include 1× tempo or interval run.",
+        "peak": "2× per week, 1× race-pace strides + 1× easy run. Keep it fresh.",
+        "race": "Easy jog (20–30 min) or rest. Save legs for racing.",
+    },
+    "swimming": {
+        "preparation": "2× per week, technique drills (1,500–2,000 m). Stroke efficiency focus.",
+        "base": "2–3× per week, aerobic sets (2,000–3,000 m). Technique + endurance.",
+        "build": "2–3× per week, include CSS-pace threshold intervals (2,500–3,500 m).",
+        "peak": "2× per week, short race-pace sets. Maintain feel for water.",
+        "race": "1× activation swim (800–1,000 m easy). Race day: warm-up as planned.",
+    },
+}
+
+
+def _build_extra_sports_sections(phase: str, sports: list[str]) -> list[str]:
+    lines: list[str] = []
+    for sport in sports:
+        if sport == "cycling":
+            continue
+        if sport == "strength":
+            guidance = _GENERIC_STRENGTH_PHASE.get(phase, "Follow strength plan.")
+            lines += ["\nStrength this phase:", f"  {guidance}"]
+            continue
+        guidance = _SPORT_PHASE_GUIDANCE.get(sport, {}).get(phase)
+        lines.append(f"\n{sport.capitalize()} this phase:")
+        lines.append(f"  {guidance}" if guidance else "  Follow sport-specific plan; scale to available hours.")
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Phase auto-selection logic (relative to goal CTL, not absolute thresholds)
 # ---------------------------------------------------------------------------
 
@@ -217,10 +327,21 @@ def _build_phase_note(
     race_name: str,
     race_date: date,
     phase_races: list[dict],
+    ftp: int | None = None,
+    strength_training: dict[str, Any] | None = None,
+    sports: list[str] | None = None,
+    fixed_weekly_events: list[str] | None = None,
 ) -> str:
     p = _PHASES[phase]
     total_wks = _weeks_in(start, end)
     load_week_idx = {w: i for i, w in enumerate(w for w in range(1, total_wks + 1) if w % cycle != 0)}
+
+    multi_sport = sports is not None and len([s for s in sports if s != "strength"]) > 1
+    sessions_label = "Key cycling sessions per week:" if multi_sport else "Key sessions per week:"
+
+    key_sessions = p["key_sessions"]
+    if ftp is not None:
+        key_sessions = _annotate_sessions_with_power(key_sessions, ftp)
 
     lines = [
         f"Phase {phase_num}/{total_phases}: {p['label']}",
@@ -228,8 +349,8 @@ def _build_phase_note(
         f"Goal: {p['focus']}",
         f"Intensity: {p['intensity']}",
         "",
-        "Key sessions per week:",
-        *[f"  • {s}" for s in p["key_sessions"]],
+        sessions_label,
+        *[f"  • {s}" for s in key_sessions],
         "",
         "Weekly schedule:",
     ]
@@ -237,6 +358,22 @@ def _build_phase_note(
         w_start = start + timedelta(weeks=w - 1)
         w_end = min(w_start + timedelta(days=6), end)
         lines.append(f"  Week {w} ({w_start} – {w_end}): {_week_tss(phase, goal_tss, w, cycle, load_week_idx)}")
+
+    if sports:
+        extra_sports = [s for s in sports if s != "strength" or strength_training is None]
+        lines.extend(_build_extra_sports_sections(phase, extra_sports))
+
+    if strength_training:
+        strength_lines = _build_strength_section(phase, strength_training)
+        if strength_lines:
+            lines.append("")
+            lines.extend(strength_lines)
+
+    if fixed_weekly_events:
+        lines.append("")
+        lines.append("Fixed weekly events (do not modify):")
+        for ev in fixed_weekly_events:
+            lines.append(f"  • {ev}")
 
     lines += ["", f"A-race: {race_name} ({race_date})"]
     if phase_races:
@@ -261,6 +398,11 @@ async def create_atp_plan(
     additional_races: str | None = None,
     athlete_id: str | None = None,
     api_key: str | None = None,
+    ftp: int | None = None,
+    weekly_hours: float | None = None,
+    sports: list[str] | None = None,
+    strength_training: dict[str, Any] | None = None,
+    fixed_weekly_events: list[str] | None = None,
 ) -> str:
     """Create an ATP (Annual Training Plan) in Intervals.icu for a goal race.
 
@@ -295,6 +437,24 @@ async def create_atp_plan(
                           e.g. "2026-03-21 Dwars door Vlaanderen [C]"
         athlete_id: The Intervals.icu athlete ID (optional)
         api_key: The Intervals.icu API key (optional)
+        ftp: FTP in watts (optional). When provided, power targets in phase notes
+             are made concrete: sweet spot ftp×0.88–0.93, threshold ftp×0.95–1.05,
+             VO2max ftp×1.06–1.20.
+        weekly_hours: Available training hours per week (optional). Used to
+                      validate TSS targets; if the goal exceeds ~65 TSS/h the
+                      peak-week target is capped to what is achievable.
+        sports: Sports trained alongside cycling (optional). Supported:
+                "cycling", "running", "swimming", "strength". Cycling stays
+                primary. With 3+ non-strength sports, cycling TSS is reduced
+                by 10% to keep total load manageable.
+        strength_training: Detailed weekly strength routine (optional). Object
+                           with blocks, exercises, equipment. Automatically
+                           scaled for recovery weeks and the peak phase.
+                           No strength in the race phase.
+        fixed_weekly_events: Recurring events that must not be overridden
+                             (optional). Listed in each phase note so the
+                             weekly planner can account for them.
+                             e.g. ["Tuesday evening criterium (Papendal)"]
     """
     athlete_id_to_use, error_msg = resolve_athlete_id(athlete_id, config.athlete_id)
     if error_msg:
@@ -311,6 +471,19 @@ async def create_atp_plan(
 
     if recovery_cycle not in (3, 4):
         return "Error: recovery_cycle must be 3 or 4."
+
+    if ftp is not None and ftp < 50:
+        return "Error: ftp must be at least 50 W."
+
+    if weekly_hours is not None and weekly_hours <= 0:
+        return "Error: weekly_hours must be a positive number."
+
+    _valid_sports = {"cycling", "running", "swimming", "strength"}
+    if sports is not None:
+        invalid = [s for s in sports if s.lower() not in _valid_sports]
+        if invalid:
+            return f"Error: unsupported sports: {invalid}. Supported: cycling, running, swimming, strength."
+        sports = [s.lower() for s in sports]
 
     today = date.today()
     if race_dt < today:
@@ -341,6 +514,24 @@ async def create_atp_plan(
 
     # Weekly TSS in peak build weeks ≈ goal_ctl × 7
     goal_weekly_tss = max(50, round(goal_ctl * 7 / 50) * 50)
+
+    # Multi-sport: reduce cycling TSS by 10% when 3+ non-strength sports
+    tss_sport_note = ""
+    if sports is not None:
+        active_sport_count = len([s for s in sports if s != "strength"])
+        if active_sport_count >= 3:
+            original_tss = goal_weekly_tss
+            goal_weekly_tss = max(50, round(goal_weekly_tss * 0.90 / 50) * 50)
+            tss_sport_note = f" (reduced from {original_tss} for multi-sport load)"
+
+    # Weekly hours: cap TSS if goal exceeds what is achievable (~65 TSS/h)
+    tss_hours_note = ""
+    if weekly_hours is not None:
+        max_feasible_tss = max(50, round(weekly_hours * 65 / 50) * 50)
+        if goal_weekly_tss > max_feasible_tss:
+            original_tss = goal_weekly_tss
+            goal_weekly_tss = max_feasible_tss
+            tss_hours_note = f" (capped from {original_tss} to fit {weekly_hours}h/week)"
 
     # Parse additional races
     extra_races: list[dict] = []
@@ -417,6 +608,10 @@ async def create_atp_plan(
             race_name=race_name,
             race_date=race_dt,
             phase_races=phase_races,
+            ftp=ftp,
+            strength_training=strength_training,
+            sports=sports,
+            fixed_weekly_events=fixed_weekly_events,
         )
         event_data: dict[str, Any] = {
             "category": "NOTE",
@@ -474,13 +669,20 @@ async def create_atp_plan(
         f"ATP created for {race_name} ({race_date})",
         f"Period: {today_monday} – {race_monday + timedelta(days=6)} ({total_weeks} weeks)",
         f"Current CTL: {ctl_source}",
-        f"Goal CTL: {goal_ctl}  →  Peak week TSS target: ~{goal_weekly_tss}",
+        f"Goal CTL: {goal_ctl}  →  Peak week TSS target: ~{goal_weekly_tss}{tss_sport_note}{tss_hours_note}",
         f"Phase selection: {reason}",
         f"Phases: {phase_names}",
         f"Recovery cycle: every {recovery_cycle} weeks",
-        "",
-        "Posted to calendar:",
-    ] + posted_lines
+    ]
+    if sports:
+        summary.append(f"Sports: {', '.join(sports)}")
+    if ftp is not None:
+        summary.append(f"FTP: {ftp} W")
+    if weekly_hours is not None:
+        summary.append(f"Weekly hours: {weekly_hours} h")
+    if fixed_weekly_events:
+        summary.append(f"Fixed events: {'; '.join(fixed_weekly_events)}")
+    summary += ["", "Posted to calendar:"] + posted_lines
 
     return "\n".join(summary)
 
